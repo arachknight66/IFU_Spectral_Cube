@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>JWST MIRI IFU Pipeline Dashboard</title>
+    <meta name="description" content="Interactive dashboard for spectral line identification in JWST MIRI IFU data cubes">
+    <link rel="stylesheet" href="/static/style.css">
+    <script src="https://cdn.plot.ly/plotly-2.35.0.min.js" charset="utf-8"></script>
+</head>
+<body>
+    <div class="app">
+        <!-- ═══ Header ═══════════════════════════════════════════════ -->
+        <header class="header">
+            <div class="header__brand">
+                <span class="header__icon">🔭</span>
+                <div>
+                    <div class="header__title">JWST MIRI IFU Pipeline</div>
+                    <div class="header__subtitle">Spectral Line Identification Dashboard</div>
+                </div>
+            </div>
+            <div class="header__status">
+                <div class="status-indicator status-indicator--idle" id="statusIndicator">
+                    <span class="status-indicator__dot"></span>
+                    <span id="statusText">Idle</span>
+                </div>
+            </div>
+        </header>
+
+        <!-- ═══ Sidebar ══════════════════════════════════════════════ -->
+        <aside class="sidebar" id="sidebar">
+            <!-- File Upload -->
+            <div class="sidebar__section">
+                <div class="sidebar__section-title">📂 Data Input</div>
+                <div class="file-upload" id="fileUpload">
+                    <span class="file-upload__icon">📦</span>
+                    <div class="file-upload__text">
+                        Drop FITS cube or <strong>browse</strong>
+                    </div>
+                    <div class="file-upload__filename" id="fileName"></div>
+                    <input type="file" id="fileInput" accept=".fits,.fits.gz">
+                </div>
+                <div style="margin-top: 10px; text-align: center; font-size: 11px; color: var(--text-tertiary);">— or —</div>
+                <div class="form-group" style="margin-top: 10px;">
+                    <label class="form-label">Load existing results directory</label>
+                    <div style="display: flex; gap: 6px;">
+                        <input type="text" class="form-input" id="resultsPath" placeholder="/path/to/outputs/">
+                        <button class="btn btn--secondary" style="width: auto; padding: 8px 12px;" onclick="loadResults()">Load</button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Extraction -->
+            <div class="sidebar__section">
+                <div class="sidebar__section-title">🎯 Extraction</div>
+                <div class="form-group">
+                    <label class="form-label">Mode</label>
+                    <select class="form-select" id="extractionMode">
+                        <option value="circular">Circular Aperture</option>
+                        <option value="percentile">Percentile</option>
+                        <option value="optimal">Optimal (inv-var)</option>
+                    </select>
+                </div>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label class="form-label">Center X</label>
+                        <input type="number" class="form-input" id="centerX" placeholder="auto">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Center Y</label>
+                        <input type="number" class="form-input" id="centerY" placeholder="auto">
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label class="form-label">Radius (spaxels)</label>
+                    <input type="number" class="form-input" id="radius" value="3.0" step="0.5">
+                </div>
+            </div>
+
+            <!-- Preprocessing -->
+            <div class="sidebar__section">
+                <div class="sidebar__section-title">⚙️ Preprocessing</div>
+                <div class="form-group">
+                    <label class="form-label">Continuum window</label>
+                    <input type="number" class="form-input" id="continuumWindow" value="101" step="2">
+                </div>
+                <label class="form-checkbox">
+                    <input type="checkbox" id="iterativeContinuum">
+                    Iterative σ-clipped continuum
+                </label>
+                <label class="form-checkbox" style="margin-top: 6px;">
+                    <input type="checkbox" id="defringe">
+                    Defringe (Lomb-Scargle)
+                </label>
+            </div>
+
+            <!-- Peak Detection -->
+            <div class="sidebar__section">
+                <div class="sidebar__section-title">📈 Peak Detection</div>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label class="form-label">Prominence σ</label>
+                        <input type="number" class="form-input" id="prominenceSigma" value="4.5" step="0.5">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Min SNR</label>
+                        <input type="number" class="form-input" id="minSnr" value="4.5" step="0.5">
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label class="form-label">Resolving Power R</label>
+                    <input type="number" class="form-input" id="resolvingPower" value="2500">
+                </div>
+                <label class="form-checkbox">
+                    <input type="checkbox" id="useCwt">
+                    Enable CWT multi-scale detection
+                </label>
+            </div>
+
+            <!-- Fitting -->
+            <div class="sidebar__section">
+                <div class="sidebar__section-title">📐 Fitting</div>
+                <div class="form-group">
+                    <label class="form-label">Min confidence</label>
+                    <input type="number" class="form-input" id="minConfidence" value="0.2" step="0.05" min="0" max="1">
+                </div>
+                <label class="form-checkbox">
+                    <input type="checkbox" id="tryVoigt" checked>
+                    Try Voigt profiles (BIC model selection)
+                </label>
+            </div>
+
+            <!-- Run Button -->
+            <button class="btn btn--primary" id="runBtn" onclick="runPipeline()">
+                🚀 Run Pipeline
+            </button>
+        </aside>
+
+        <!-- ═══ Main Content ═════════════════════════════════════════ -->
+        <main class="main" id="mainContent">
+            <!-- Welcome screen -->
+            <div id="welcomeScreen" class="welcome">
+                <span class="welcome__icon">🌌</span>
+                <h1 class="welcome__title">Welcome to the IFU Pipeline</h1>
+                <p class="welcome__description">
+                    Upload a JWST MIRI IFU FITS cube or load existing results
+                    to begin spectral line identification. Configure extraction
+                    and detection parameters in the sidebar.
+                </p>
+            </div>
+
+            <!-- Results -->
+            <div id="resultsContent" class="hidden">
+                <!-- Summary cards -->
+                <div class="stats-grid" id="statsGrid"></div>
+
+                <!-- Interactive spectrum -->
+                <div class="card animate-in">
+                    <div class="card__header">
+                        <div class="card__title">📊 Interactive Spectrum Viewer</div>
+                        <div class="tabs" id="spectrumTabs">
+                            <button class="tab tab--active" data-view="processed" onclick="switchSpectrumView('processed', this)">Processed</button>
+                            <button class="tab" data-view="raw" onclick="switchSpectrumView('raw', this)">Raw + Continuum</button>
+                            <button class="tab" data-view="comparison" onclick="switchSpectrumView('comparison', this)">SG vs Gaussian</button>
+                        </div>
+                    </div>
+                    <div class="card__body card__body--no-padding">
+                        <div class="plot-container" id="spectrumPlot"></div>
+                    </div>
+                </div>
+
+                <!-- Line matches table -->
+                <div class="card animate-in">
+                    <div class="card__header">
+                        <div class="card__title">🏷️ Identified Spectral Lines</div>
+                        <span id="matchCount" style="font-size: 12px; color: var(--text-secondary);"></span>
+                    </div>
+                    <div class="card__body card__body--no-padding">
+                        <div class="table-scroll">
+                            <table class="data-table" id="matchesTable">
+                                <thead>
+                                    <tr>
+                                        <th>Line</th>
+                                        <th>λ_obs (µm)</th>
+                                        <th>λ_rest (µm)</th>
+                                        <th>Δλ (µm)</th>
+                                        <th>Ionization</th>
+                                        <th>Confidence</th>
+                                        <th>Reliability</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="matchesBody"></tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Peaks table -->
+                <div class="card animate-in">
+                    <div class="card__header">
+                        <div class="card__title">🔍 Detected Peaks</div>
+                        <span id="peakCount" style="font-size: 12px; color: var(--text-secondary);"></span>
+                    </div>
+                    <div class="card__body card__body--no-padding">
+                        <div class="table-scroll">
+                            <table class="data-table" id="peaksTable">
+                                <thead>
+                                    <tr>
+                                        <th>Channel</th>
+                                        <th>λ (µm)</th>
+                                        <th>Flux</th>
+                                        <th>Prominence</th>
+                                        <th>Width (ch)</th>
+                                        <th>SNR</th>
+                                        <th>Local SNR</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="peaksBody"></tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Diagnostic plots gallery -->
+                <div class="card animate-in">
+                    <div class="card__header">
+                        <div class="card__title">🎨 Diagnostic Plots</div>
+                    </div>
+                    <div class="plot-gallery" id="plotGallery"></div>
+                </div>
+
+                <!-- Timing -->
+                <div class="card animate-in">
+                    <div class="card__header">
+                        <div class="card__title">⏱️ Pipeline Timing</div>
+                    </div>
+                    <div class="card__body">
+                        <div class="timing-grid" id="timingGrid"></div>
+                    </div>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <!-- Lightbox for full-size plots -->
+    <div class="lightbox" id="lightbox" onclick="closeLightbox()">
+        <img class="lightbox__image" id="lightboxImage" src="" alt="Full-size plot">
+    </div>
+
+    <script src="/static/app.js"></script>
+</body>
+</html>

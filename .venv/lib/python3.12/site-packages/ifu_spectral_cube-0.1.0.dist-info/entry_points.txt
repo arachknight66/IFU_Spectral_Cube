@@ -1,0 +1,3 @@
+[console_scripts]
+ifu-line-id = ifu_spectral_cube.cli:main
+ifu-web = ifu_spectral_cube.web.server:run_server
