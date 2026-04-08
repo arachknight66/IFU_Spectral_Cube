@@ -47,79 +47,155 @@ st.set_page_config(
 # ===========================================================================
 st.markdown("""
 <style>
-    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+    @import url('https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap');
 
+    /* Global Typography & Background */
     html, body, [class*="css"] {
-        font-family: 'Inter', sans-serif;
+        font-family: 'Outfit', sans-serif;
     }
-
+    
+    /* Base App Background */
+    .stApp {
+        background: radial-gradient(circle at 50% 0%, #1a1c29, #0a0b10);
+        color: #e2e8f0;
+    }
+    
     .main > div { padding-top: 1.5rem; }
 
-    /* Header styling */
+    /* Top Header - Premium Glassmorphism */
     .pipeline-header {
-        background: linear-gradient(135deg, #0f0c29, #302b63, #24243e);
-        border-radius: 12px;
-        padding: 1.8rem 2rem;
-        margin-bottom: 1.5rem;
-        color: white;
-        border: 1px solid rgba(255,255,255,0.06);
+        background: rgba(20, 22, 37, 0.4);
+        backdrop-filter: blur(16px);
+        -webkit-backdrop-filter: blur(16px);
+        border-radius: 16px;
+        padding: 2rem 2.5rem;
+        margin-bottom: 2.5rem;
+        border: 1px solid rgba(102, 252, 241, 0.15);
+        box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.4);
+        position: relative;
+        overflow: hidden;
+    }
+    .pipeline-header::before {
+        content: "";
+        position: absolute;
+        top: 0; left: 0; right: 0; height: 3px;
+        background: linear-gradient(90deg, #4facfe 0%, #00f2fe 100%, #66fcf1 100%);
     }
     .pipeline-header h1 {
-        font-size: 1.6rem;
+        font-size: 2.4rem;
         font-weight: 700;
         margin: 0;
-        letter-spacing: -0.02em;
+        background: -webkit-linear-gradient(45deg, #ffffff, #8bc6ec);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+        letter-spacing: -0.01em;
     }
     .pipeline-header p {
-        color: rgba(255,255,255,0.65);
-        font-size: 0.85rem;
-        margin: 0.3rem 0 0;
+        color: #94a3b8;
+        font-size: 0.95rem;
+        margin: 0.5rem 0 0;
+        font-weight: 300;
+        letter-spacing: 0.05em;
     }
 
-    /* Metric cards */
+    /* Metric Cards - Interactive hover and glass */
     .metric-card {
-        background: linear-gradient(145deg, #1a1a2e, #16213e);
-        border: 1px solid rgba(255,255,255,0.08);
-        border-radius: 10px;
-        padding: 1rem 1.2rem;
+        background: linear-gradient(145deg, rgba(30, 33, 48, 0.6), rgba(20, 22, 31, 0.8));
+        backdrop-filter: blur(10px);
+        border: 1px solid rgba(255, 255, 255, 0.05);
+        border-radius: 14px;
+        padding: 1.2rem;
         text-align: center;
+        transition: transform 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275), box-shadow 0.3s ease, border-color 0.3s ease;
+        box-shadow: 0 4px 15px rgba(0,0,0,0.2);
+    }
+    .metric-card:hover {
+        transform: translateY(-5px) scale(1.02);
+        box-shadow: 0 12px 25px rgba(0,0,0,0.4);
+        border-color: rgba(102, 252, 241, 0.4);
     }
     .metric-card .value {
-        font-size: 1.5rem;
+        font-size: 1.8rem;
         font-weight: 700;
-        color: #00d2ff;
+        color: #66fcf1;
+        text-shadow: 0 0 12px rgba(102, 252, 241, 0.3);
     }
     .metric-card .label {
         font-size: 0.72rem;
-        color: rgba(255,255,255,0.5);
+        color: #94a3b8;
         text-transform: uppercase;
-        letter-spacing: 0.06em;
+        letter-spacing: 0.12em;
+        margin-top: 5px;
+        font-weight: 600;
     }
 
-    /* Sidebar refinements */
+    /* Sidebar Refinements */
     [data-testid="stSidebar"] {
-        background: linear-gradient(180deg, #0f0c29 0%, #1a1a2e 100%);
+        background: linear-gradient(180deg, #10121a 0%, #0a0b10 100%);
+        border-right: 1px solid rgba(255,255,255,0.05);
+    }
+    [data-testid="stSidebar"] hr {
+        border-color: rgba(255,255,255,0.08);
     }
     [data-testid="stSidebar"] .stMarkdown h3 {
-        color: #00d2ff;
+        color: #4facfe;
         font-size: 0.85rem;
         text-transform: uppercase;
-        letter-spacing: 0.08em;
+        letter-spacing: 0.15em;
+        font-weight: 600;
+        margin-bottom: 0.5rem;
     }
 
-    /* Tab styling */
+    /* Tabs Styling */
     .stTabs [data-baseweb="tab-list"] {
-        gap: 0.5rem;
+        gap: 1rem;
+        background: rgba(20, 22, 31, 0.4);
+        padding: 0.5rem 1rem 0;
+        border-radius: 12px 12px 0 0;
+        border-bottom: 1px solid rgba(255,255,255,0.05);
     }
     .stTabs [data-baseweb="tab"] {
         border-radius: 8px 8px 0 0;
         font-weight: 500;
+        color: #94a3b8;
+        padding: 0.8rem 1.5rem;
+        transition: all 0.3s ease;
+    }
+    .stTabs [aria-selected="true"] {
+        background: rgba(79, 172, 254, 0.1);
+        color: #66fcf1 !important;
+        border-bottom-color: #66fcf1;
     }
 
-    /* Clean table styling */
-    .stDataFrame {
+    /* Buttons */
+    .stButton > button {
+        background: linear-gradient(90deg, #4facfe 0%, #00f2fe 100%);
+        color: #000;
+        font-weight: 600;
+        border: none;
         border-radius: 8px;
+        transition: all 0.3s ease;
+    }
+    .stButton > button:hover {
+        box-shadow: 0 0 15px rgba(79, 172, 254, 0.5);
+        transform: scale(1.02);
+        color: #000;
+    }
+
+    /* Dataframes/Tables */
+    .stDataFrame {
+        border-radius: 12px;
         overflow: hidden;
+        border: 1px solid rgba(255,255,255,0.05);
+    }
+
+    /* Main Page Entry Animation */
+    @keyframes fadeInScale {
+        0% { opacity: 0; transform: translateY(10px); }
+        100% { opacity: 1; transform: translateY(0); }
+    }
+    .main > div {
+        animation: fadeInScale 0.5s ease-out forwards;
     }
 </style>
 """, unsafe_allow_html=True)
