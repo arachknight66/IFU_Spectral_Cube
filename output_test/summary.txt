@@ -1,0 +1,49 @@
+=================================================================
+JWST MIRI IFU Pipeline — Analysis Summary
+=================================================================
+
+Source file:  synthetic
+Cube shape:   (500, 30, 30)
+Wavelength:   5.0000 – 28.0000 µm
+Pixel:        (15, 15)
+
+--- Configuration ---
+SG window:    11
+SG polyorder: 3
+Continuum:    poly order 3, σ-clip=3.0
+Peak detect:  prominence=3.0, distance=5
+Line ID:      tolerance=0.05 µm, z=0.0
+
+--- Results ---
+Noise RMS:       2.756183e-01
+Peaks detected:  13
+Lines identified: 8
+
+--- Detected Peaks ---
+  #      λ (µm)      SNR          Species      Rest λ    Conf
+------------------------------------------------------------
+  1      8.3647      3.1                —           —       —
+  2      9.0100     15.8         [Ar III]      8.9910   0.620
+  3      9.7014     14.7               H₂      9.6650   0.272
+  4     10.5311     23.5           [S IV]     10.5110   0.599
+  5     11.3146    127.7              PAH     11.3000   0.707
+  6     12.2826     10.2               H₂     12.2790   0.929
+  7     12.8357     34.1          [Ne II]     12.8140   0.567
+  8     17.0301     25.4               H₂     17.0350   0.901
+  9     18.0902      6.8                —           —       —
+ 10     18.6894     35.5          [S III]     18.7130   0.528
+ 11     19.3808      4.0                —           —       —
+ 12     24.4048      3.1                —           —       —
+ 13     25.5571      3.6                —           —       —
+
+Images generated: 10
+  • slice_16.52um
+  • full_band_integrated
+  • emission_[Ar III]_8.99
+  • emission_H₂_9.66
+  • emission_[S IV]_10.51
+  • emission_PAH_11.30
+  • emission_H₂_12.28
+  • emission_[Ne II]_12.81
+  • emission_H₂_17.04
+  • emission_[S III]_18.71
