@@ -4,7 +4,7 @@ A modern, production-grade Python pipeline designed specifically to process and 
 
 ---
 
-## 🌟 Key Features
+##  Key Features
 
 - **Seamless Spectral Stitching** — Upload multiple diverse channel cubes (such as `ch1-short` and `ch2-medium`). The pipeline uses `astropy.wcs` to dynamically warp varying field-of-view arrays and pixel CDELT resolutions onto a mathematically exact unified spatial grid.
 - **Robust Preprocessing** — Applies Savitzky-Golay denoising, deliberately avoiding standard Gaussian algorithms which catastrophically blend tight spectral pairs in MIRI datasets (e.g., [Ne II] 12.814 µm and PAH 12.7 µm).
@@ -12,7 +12,7 @@ A modern, production-grade Python pipeline designed specifically to process and 
 - **Resilient Degenerate HDU Handling** — Built in fallback geometry parsing. JWST Level-3 (`s3d`) ASDF pipelines often strip standard linear astropy headers, causing silent 0-dimension failures. The pipeline catches these structure anomalies and maps fallback 1:1 boundaries natively.
 - **Publication Imaging** — Render monochromatic slices, band-integrated fluxes, and robust continuum-subtracted emission line maps ready for paper publication.
 
-## 🏗️ Architecture Stack
+##  Architecture Stack
 
 All pure scientific logic is abstracted from the UI elements. 
 
@@ -24,7 +24,7 @@ FITS File(s) → loader.py & stitch.py → Master SpectralCube
     → Output (Matplotlib publication renderings + Streamlit)
 ```
 
-## 🚀 Quick Start
+##  Quick Start
 
 ### Installation
 
@@ -59,7 +59,7 @@ python main.py --synthetic --x 15 --y 15
 python main.py path/to/cube.fits --savgol-window 13 --prominence 3.0 --tolerance 0.08 --redshift 0.003
 ```
 
-## 📂 Project Structure
+##  Project Structure
 
 ```text
 IFU_Spectral_Cube/
@@ -96,13 +96,10 @@ IFU_Spectral_Cube/
 └── main.py                 # Core shell execution
 ```
 
-## 🌌 Spectral Line Database Integration
+##  Spectral Line Database Integration
 
 The internal constants package actively guards against:
 - **Major Atomic Lines**: [Ne II], [Ne III], [Ar II], [Ar III], [S III], [S IV].
 - **Molecules**: Extensively handles H₂ chains (S(0) through S(7)) and common carbon configurations (CO₂, C₂H₂, HCN).
 - **Dust/Ices**: Broad bands at 6.2, 7.7, 8.6, 11.3, and 12.7 µm (PAHs) and structural ices.
 
-## License
-
-MIT 
