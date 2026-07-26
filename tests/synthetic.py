@@ -99,8 +99,10 @@ def generate_synthetic_cube(
             -0.5 * ((wavelength - wl_center) / sigma) ** 2
         )
 
-    # Build 3D cube
+    # Build 3D cube, error array, and DQ bitmask
     data = np.zeros((n_wavelength, ny, nx), dtype=np.float64)
+    err = np.zeros((n_wavelength, ny, nx), dtype=np.float64)
+    dq = np.zeros((n_wavelength, ny, nx), dtype=np.int32)
 
     # Spatial structure: smooth brightness gradient
     y_grid, x_grid = np.mgrid[0:ny, 0:nx]
@@ -116,12 +118,20 @@ def generate_synthetic_cube(
     for iy in range(ny):
         for ix in range(nx):
             # Continuum scales with brightness
-            spectrum = continuum_template * brightness_map[iy, ix]
+            base_spectrum = continuum_template * brightness_map[iy, ix]
             # Lines enhanced at source position
-            spectrum += line_template * (1.0 + source_map[iy, ix])
-            # Add noise
-            spectrum += rng.normal(0, noise_level, n_wavelength)
-            data[:, iy, ix] = spectrum
+            base_spectrum += line_template * (1.0 + source_map[iy, ix])
+
+            # Variance = Poisson variance (|flux|) + Readout noise variance
+            local_err = np.sqrt(np.maximum(0.01, np.abs(base_spectrum) * 0.05) + noise_level**2)
+            noise = rng.normal(0, local_err, n_wavelength)
+
+            data[:, iy, ix] = base_spectrum + noise
+            err[:, iy, ix] = local_err
+
+    # Inject bad pixels in DQ mask for validation (e.g. 5 random bad pixels)
+    dq[10, 5, 5] = 1   # DO_NOT_USE bit flag
+    dq[20, 15, 15] = 2  # SATURATED bit flag
 
     return SpectralCube(
         data=data,
@@ -139,6 +149,8 @@ def generate_synthetic_cube(
             "BUNIT": "MJy/sr",
         },
         filepath="synthetic",
+        err=err,
+        dq=dq,
     )
 
 

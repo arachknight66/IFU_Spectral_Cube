@@ -47,6 +47,28 @@ Examples:
         help="Use a synthetic test cube instead of a FITS file.",
     )
 
+    # MAST Archive mode
+    parser.add_argument(
+        "--mast-target", type=str, default="",
+        help="Search and download JWST dataset from MAST by target name (e.g., 'NGC 7319')",
+    )
+    parser.add_argument(
+        "--mast-proposal", type=str, default="",
+        help="Search and download JWST dataset from MAST by Proposal/Program ID (e.g., '1288')",
+    )
+    parser.add_argument(
+        "--ra", type=str, default="",
+        help="Search MAST by Right Ascension (decimal degrees or sexagesimal e.g. '339.967' or '22h39m52s')",
+    )
+    parser.add_argument(
+        "--dec", type=str, default="",
+        help="Search MAST by Declination (decimal degrees or sexagesimal e.g. '33.963' or '+33d57m46s')",
+    )
+    parser.add_argument(
+        "--radius-arcsec", type=float, default=15.0,
+        help="Search radius in arcseconds for MAST RA/Dec cone search (default: 15.0)",
+    )
+
     # Pixel coordinates
     parser.add_argument("-x", "--x", type=int, default=0, help="X pixel coordinate (default: 0)")
     parser.add_argument("-y", "--y", type=int, default=0, help="Y pixel coordinate (default: 0)")
@@ -73,6 +95,9 @@ Examples:
 
 def main(argv: list[str] | None = None) -> int:
     """Main entry point."""
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
     args = parse_args(argv)
 
     # Lazy import to keep argparse fast
@@ -95,20 +120,42 @@ def main(argv: list[str] | None = None) -> int:
     pipeline = SpectralPipeline(config)
 
     if args.synthetic:
-        print("═" * 60)
+        print("=" * 60)
         print("  JWST MIRI IFU Spectral Pipeline — Synthetic Test Mode")
-        print("═" * 60)
+        print("=" * 60)
         from tests.synthetic import generate_synthetic_cube
         cube = generate_synthetic_cube()
         print(f"\n  Cube: {cube}")
+    elif args.mast_target or args.mast_proposal or (args.ra and args.dec):
+        print("=" * 60)
+        print("  JWST MIRI IFU Spectral Pipeline — MAST Archive Mode")
+        print("=" * 60)
+        from src.core.mast import search_mast_jwst, download_mast_product
+        if args.ra and args.dec:
+            print(f"\n  Searching MAST for RA={args.ra}, Dec={args.dec} (Radius={args.radius_arcsec}\")...")
+            records = search_mast_jwst(ra=args.ra, dec=args.dec, radius_arcsec=args.radius_arcsec, limit=1)
+        else:
+            print(f"\n  Searching MAST for Target='{args.mast_target}', Proposal='{args.mast_proposal}'...")
+            records = search_mast_jwst(target_name=args.mast_target, proposal_id=args.mast_proposal or None, limit=1)
+
+        if not records:
+            print("Error: No MAST observations found matching search parameters.", file=sys.stderr)
+            return 1
+        rec = records[0]
+        print(f"  Found: {rec['obs_id']} ({rec['submode']})")
+        print(f"  Downloading product: {rec['product_filename']}...")
+        local_path = download_mast_product(rec['download_url'], rec['product_filename'])
+        print(f"  Loading: {local_path}")
+        cube = pipeline.load(str(local_path))
+        print(f"  Cube: {cube}")
     elif args.fits_file:
         filepath = Path(args.fits_file)
         if not filepath.exists():
             print(f"Error: FITS file not found: {filepath}", file=sys.stderr)
             return 1
-        print("═" * 60)
+        print("=" * 60)
         print("  JWST MIRI IFU Spectral Pipeline")
-        print("═" * 60)
+        print("=" * 60)
         print(f"\n  Loading: {filepath}")
         cube = pipeline.load(str(filepath))
         print(f"  Cube: {cube}")
@@ -142,7 +189,7 @@ def main(argv: list[str] | None = None) -> int:
         print("  " + "-" * 45)
         for i in range(analysis.peaks.n_peaks):
             match = analysis.line_matches[i] if i < len(analysis.line_matches) else None
-            species = match.matched_species if match else "—"
+            species = match.matched_species if match else "-"
             print(f"  {i+1:>3}  {analysis.peaks.wavelengths[i]:>10.4f}  "
                   f"{analysis.peaks.snr[i]:>7.1f}  {species:>15}")
 
@@ -166,7 +213,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"         Saved to: {out_path}/")
 
     print("\n  [4/4] Done!")
-    print("═" * 60)
+    print("=" * 60)
 
     return 0
 

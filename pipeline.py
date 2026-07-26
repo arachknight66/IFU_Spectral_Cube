@@ -60,6 +60,8 @@ class AnalysisResult:
     peaks: PeakResult
     gaussian_fits: list[GaussianFit]
     line_matches: list[LineMatch | None]
+    raw_err: np.ndarray | None = None
+    processed_err: np.ndarray | None = None
 
 
 @dataclass
@@ -179,6 +181,7 @@ class SpectralPipeline:
         self,
         wavelength: np.ndarray,
         spectrum: np.ndarray,
+        err: np.ndarray | None = None,
     ) -> tuple[PeakResult, list[GaussianFit], list[LineMatch | None]]:
         """Run peak detection, Gaussian fitting, and line identification.
 
@@ -188,6 +191,8 @@ class SpectralPipeline:
             Wavelength axis (µm).
         spectrum : np.ndarray
             Processed (continuum-subtracted) 1D spectrum.
+        err : np.ndarray, optional
+            1D standard error array.
 
         Returns
         -------
@@ -201,10 +206,11 @@ class SpectralPipeline:
             height=self.config.peak_height,
         )
 
-        # Gaussian fitting
+        # Gaussian fitting with error propagation
         if peaks.n_peaks > 0:
             fits = fit_gaussian_peaks(
                 wavelength, spectrum, peaks.indices,
+                err=err,
             )
         else:
             fits = []
@@ -248,12 +254,14 @@ class SpectralPipeline:
 
         wavelength = extraction["wavelength"]
         raw = extraction["raw"]
+        raw_err = extraction.get("raw_err")
         denoised = extraction["denoised"]
         continuum = extraction["continuum"]
         processed = extraction["processed"]
+        processed_err = extraction.get("processed_err")
 
         # Detect, fit, identify
-        peaks, fits, matches = self.detect_and_identify(wavelength, processed)
+        peaks, fits, matches = self.detect_and_identify(wavelength, processed, err=processed_err)
 
         return AnalysisResult(
             x=x, y=y,
@@ -265,6 +273,8 @@ class SpectralPipeline:
             peaks=peaks,
             gaussian_fits=fits,
             line_matches=matches,
+            raw_err=raw_err,
+            processed_err=processed_err,
         )
 
     # ------------------------------------------------------------------ #
@@ -426,8 +436,9 @@ class SpectralPipeline:
             )
 
             # Also save individual images
+            import re
             for name, img in result.images.items():
-                safe_name = name.replace(" ", "_").replace("/", "_")
+                safe_name = re.sub(r'[^a-zA-Z0-9_\-.]', '', name.replace(" ", "_").replace("₂", "2"))
                 plot_image(
                     img, title=name,
                     save_path=str(out / f"{safe_name}.png"),
@@ -444,21 +455,48 @@ class SpectralPipeline:
 
 
 def _save_peak_csv(analysis: AnalysisResult, filepath: Path) -> None:
-    """Save detected peaks to a CSV file."""
+    """Save detected peaks to a CSV file with full uncertainty propagation and kinematics."""
     import csv
+    from src.analysis.advanced import compute_intrinsic_kinematics
 
-    with open(filepath, "w", newline="") as f:
+    with open(filepath, "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
         writer.writerow([
             "peak_index", "wavelength_um", "flux", "prominence",
             "snr", "width_channels", "width_um",
-            "gaussian_center", "gaussian_fwhm", "gaussian_flux",
+            "gaussian_center", "gaussian_center_err",
+            "gaussian_fwhm", "gaussian_fwhm_err",
+            "gaussian_flux", "gaussian_flux_err",
+            "reduced_chi2", "dof",
+            "resolving_power", "fwhm_inst_um", "fwhm_intrinsic_um",
+            "sigma_v_kms", "sigma_v_err_kms",
             "identified_species", "rest_wavelength", "confidence",
         ])
 
         for i in range(analysis.peaks.n_peaks):
             gfit = analysis.gaussian_fits[i] if i < len(analysis.gaussian_fits) else None
             match = analysis.line_matches[i] if i < len(analysis.line_matches) else None
+
+            if gfit and gfit.fit_success:
+                center_val = f"{gfit.center:.5f}"
+                center_err = f"{gfit.center_err:.5f}"
+                fwhm_val = f"{gfit.fwhm:.5f}"
+                fwhm_err = f"{gfit.fwhm_err:.5f}"
+                flux_val = f"{gfit.integrated_flux:.6e}"
+                flux_err = f"{gfit.integrated_flux_err:.6e}"
+                rchi2_val = f"{gfit.reduced_chi2:.3f}"
+                dof_val = int(gfit.dof)
+
+                kin = compute_intrinsic_kinematics(gfit.fwhm, gfit.fwhm_err, gfit.center)
+                r_power = f"{kin['resolving_power']:.0f}"
+                fwhm_inst = f"{kin['fwhm_inst_um']:.5f}"
+                fwhm_intr = f"{kin['fwhm_intrinsic_um']:.5f}"
+                sig_v = f"{kin['sigma_v_kms']:.2f}"
+                sig_v_err = f"{kin['sigma_v_err_kms']:.2f}"
+            else:
+                center_val = center_err = fwhm_val = fwhm_err = flux_val = flux_err = rchi2_val = ""
+                dof_val = ""
+                r_power = fwhm_inst = fwhm_intr = sig_v = sig_v_err = ""
 
             writer.writerow([
                 int(analysis.peaks.indices[i]),
@@ -468,9 +506,12 @@ def _save_peak_csv(analysis: AnalysisResult, filepath: Path) -> None:
                 f"{analysis.peaks.snr[i]:.2f}",
                 f"{analysis.peaks.widths[i]:.2f}",
                 f"{analysis.peaks.widths_um[i]:.5f}",
-                f"{gfit.center:.5f}" if gfit and gfit.fit_success else "",
-                f"{gfit.fwhm:.5f}" if gfit and gfit.fit_success else "",
-                f"{gfit.integrated_flux:.6e}" if gfit and gfit.fit_success else "",
+                center_val, center_err,
+                fwhm_val, fwhm_err,
+                flux_val, flux_err,
+                rchi2_val, dof_val,
+                r_power, fwhm_inst, fwhm_intr,
+                sig_v, sig_v_err,
                 match.matched_species if match else "",
                 f"{match.rest_wavelength_um:.5f}" if match else "",
                 f"{match.confidence:.3f}" if match else "",
@@ -478,20 +519,24 @@ def _save_peak_csv(analysis: AnalysisResult, filepath: Path) -> None:
 
 
 def _save_summary(result: PipelineResult, filepath: Path) -> None:
-    """Save a human-readable analysis summary."""
+    """Save a human-readable analysis summary with formal uncertainties."""
+    from src.analysis.advanced import compute_intrinsic_kinematics
+
     analysis = result.analysis
     cube = result.cube
     config = result.config
 
     lines: list[str] = []
-    lines.append("=" * 65)
-    lines.append("JWST MIRI IFU Pipeline — Analysis Summary")
-    lines.append("=" * 65)
+    lines.append("=" * 75)
+    lines.append("JWST MIRI IFU Pipeline — Rigorous Physical Analysis Summary")
+    lines.append("=" * 75)
     lines.append("")
     lines.append(f"Source file:  {cube.filepath}")
     lines.append(f"Cube shape:   {cube.shape}")
     lines.append(f"Wavelength:   {cube.wavelength_range[0]:.4f} – {cube.wavelength_range[1]:.4f} µm")
     lines.append(f"Pixel:        ({analysis.x}, {analysis.y})")
+    lines.append(f"Errors present: {cube.has_err}")
+    lines.append(f"DQ present:    {cube.has_dq}")
     lines.append("")
     lines.append("--- Configuration ---")
     lines.append(f"SG window:    {config.savgol_window}")
@@ -512,20 +557,36 @@ def _save_summary(result: PipelineResult, filepath: Path) -> None:
     lines.append("")
 
     if analysis.peaks.n_peaks > 0:
-        lines.append("--- Detected Peaks ---")
-        lines.append(f"{'#':>3}  {'λ (µm)':>10}  {'SNR':>7}  {'Species':>15}  "
-                     f"{'Rest λ':>10}  {'Conf':>6}")
-        lines.append("-" * 60)
+        lines.append("--- Detected Peaks & Physical Line Parameters ---")
+        lines.append(
+            f"{'#':>2}  {'λ_obs (µm)':>10}  {'SNR':>6}  {'Species':>12}  "
+            f"{'Rest λ':>9}  {'Flux (±err)':>22}  {'χ²_red':>7}  {'σ_v (km/s)':>14}"
+        )
+        lines.append("-" * 90)
 
         for i in range(analysis.peaks.n_peaks):
             match = analysis.line_matches[i] if i < len(analysis.line_matches) else None
+            gfit = analysis.gaussian_fits[i] if i < len(analysis.gaussian_fits) else None
+
+            if gfit and gfit.fit_success:
+                flux_str = f"{gfit.integrated_flux:.3e}±{gfit.integrated_flux_err:.1e}"
+                rchi2_str = f"{gfit.reduced_chi2:.2f}"
+                kin = compute_intrinsic_kinematics(gfit.fwhm, gfit.fwhm_err, gfit.center)
+                sig_v_str = f"{kin['sigma_v_kms']:.1f}±{kin['sigma_v_err_kms']:.1f}"
+            else:
+                flux_str = "—"
+                rchi2_str = "—"
+                sig_v_str = "—"
+
             lines.append(
-                f"{i + 1:>3}  "
+                f"{i + 1:>2}  "
                 f"{analysis.peaks.wavelengths[i]:>10.4f}  "
-                f"{analysis.peaks.snr[i]:>7.1f}  "
-                f"{(match.matched_species if match else '—'):>15}  "
-                f"{(f'{match.rest_wavelength_um:.4f}' if match else '—'):>10}  "
-                f"{(f'{match.confidence:.3f}' if match else '—'):>6}"
+                f"{analysis.peaks.snr[i]:>6.1f}  "
+                f"{(match.matched_species if match else '—'):>12}  "
+                f"{(f'{match.rest_wavelength_um:.4f}' if match else '—'):>9}  "
+                f"{flux_str:>22}  "
+                f"{rchi2_str:>7}  "
+                f"{sig_v_str:>14}"
             )
 
     lines.append("")
@@ -533,4 +594,4 @@ def _save_summary(result: PipelineResult, filepath: Path) -> None:
     for name in result.images:
         lines.append(f"  • {name}")
 
-    filepath.write_text("\n".join(lines))
+    filepath.write_text("\n".join(lines), encoding="utf-8")

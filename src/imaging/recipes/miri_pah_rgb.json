@@ -1,0 +1,14 @@
+{
+  "name": "MIRI PAH-focused RGB",
+  "target_name": "Replace with MAST target name",
+  "mast_search": null,
+  "expected_product": {"instrument": "MIRI", "product_type": "s3d", "observing_mode": "MRS IFU"},
+  "mapping_intent": "scientific",
+  "mapping_note": "Colours map named PAH and ionic features for physical comparison, not natural visible-light appearance.",
+  "channels": [
+    {"feature_name": "PAH 7.7 µm", "central_wavelength_um": 7.7, "integration_width_um": 0.55, "continuum_subtraction": {"enabled": true, "method": "local_linear_fit", "sideband_width_um": 0.30, "gap_um": 0.35}, "display_colour": "blue"},
+    {"feature_name": "PAH 11.3 µm", "central_wavelength_um": 11.3, "integration_width_um": 0.35, "continuum_subtraction": {"enabled": true, "method": "local_linear_fit", "sideband_width_um": 0.22, "gap_um": 0.24}, "display_colour": "green"},
+    {"feature_name": "[Ne II] 12.81 µm", "central_wavelength_um": 12.81, "integration_width_um": 0.14, "continuum_subtraction": {"enabled": true, "method": "adjacent_sidebands", "sideband_width_um": 0.16, "gap_um": 0.07}, "display_colour": "red"}
+  ],
+  "rendering": {"stretch": "asinh", "percentile_clip": [1.0, 99.5], "background_subtraction": "per_channel_median", "colour_balance": "preserve_flux_ratios", "output_resolution": [2048, 2048], "output_filename": "miri_pah_rgb.png"}
+}

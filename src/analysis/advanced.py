@@ -49,6 +49,75 @@ _COMMON_LINES = {
     "H₂", "H I", "PAH", "[Fe II]", "[O IV]",
 }
 
+SPEED_OF_LIGHT_KM_S: float = 299792.458
+FWHM_FACTOR: float = 2.0 * np.sqrt(2.0 * np.log(2.0))  # ≈ 2.35482
+
+
+def get_miri_mrs_lsf(wavelength_um: float) -> tuple[float, float]:
+    """Return JWST MIRI MRS resolving power R and instrumental FWHM (µm).
+
+    Based on Labiano et al. (2021) and JWST MIRI MRS calibration pipeline metrics:
+    - Channel 1 (4.9–7.65 µm):   R ~ 3100 – 3700
+    - Channel 2 (7.5–11.7 µm):   R ~ 2800 – 3300
+    - Channel 3 (11.55–17.98 µm): R ~ 2400 – 2900
+    - Channel 4 (17.7–27.9 µm):  R ~ 1300 – 1700
+    """
+    wl = float(wavelength_um)
+    if wl <= 7.65:
+        r = 3500.0 - 100.0 * (wl - 5.0)
+    elif wl <= 11.7:
+        r = 3200.0 - 120.0 * (wl - 7.5)
+    elif wl <= 18.0:
+        r = 2800.0 - 100.0 * (wl - 11.55)
+    else:
+        r = 1700.0 - 40.0 * (wl - 17.7)
+
+    r = float(np.clip(r, 1200.0, 4000.0))
+    fwhm_inst_um = wl / r
+    return r, fwhm_inst_um
+
+
+def compute_intrinsic_kinematics(
+    fwhm_obs_um: float,
+    fwhm_obs_err_um: float,
+    wavelength_um: float,
+) -> dict[str, float]:
+    """Deconvolve instrumental LSF and compute intrinsic velocity dispersion (km/s).
+
+    Returns
+    -------
+    dict
+        Keys: 'resolving_power', 'fwhm_inst_um', 'fwhm_intrinsic_um',
+              'sigma_v_kms', 'sigma_v_err_kms'
+    """
+    r_power, fwhm_inst_um = get_miri_mrs_lsf(wavelength_um)
+
+    # Deconvolve in quadrature
+    diff_sq = fwhm_obs_um ** 2 - fwhm_inst_um ** 2
+    if diff_sq > 0:
+        fwhm_intrinsic_um = float(np.sqrt(diff_sq))
+        # sigma_v = (c * FWHM_intrinsic) / (2.35482 * lambda_0)
+        sigma_v_kms = (SPEED_OF_LIGHT_KM_S * fwhm_intrinsic_um) / (FWHM_FACTOR * wavelength_um)
+        # Error propagation: d(sigma_v)/d(FWHM_obs) = (c / (2.35482 * lambda)) * (FWHM_obs / FWHM_intrinsic)
+        sigma_v_err_kms = (
+            (SPEED_OF_LIGHT_KM_S / (FWHM_FACTOR * wavelength_um)) *
+            (fwhm_obs_um / fwhm_intrinsic_um) *
+            fwhm_obs_err_um
+        )
+    else:
+        # Line is unresolved (dominated by instrumental LSF)
+        fwhm_intrinsic_um = 0.0
+        sigma_v_kms = 0.0
+        sigma_v_err_kms = 0.0
+
+    return {
+        "resolving_power": r_power,
+        "fwhm_inst_um": fwhm_inst_um,
+        "fwhm_intrinsic_um": fwhm_intrinsic_um,
+        "sigma_v_kms": float(sigma_v_kms),
+        "sigma_v_err_kms": float(sigma_v_err_kms),
+    }
+
 
 @dataclass
 class ConfidenceResult:

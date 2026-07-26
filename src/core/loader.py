@@ -22,7 +22,10 @@ from typing import Any
 
 import numpy as np
 from astropy.io import fits
-from astropy.wcs import WCS
+try:
+    from astropy.wcs import WCS
+except ImportError:
+    WCS = None
 
 from .cube import SpectralCube
 
@@ -61,17 +64,25 @@ def load_fits_cube(filepath: str | Path) -> SpectralCube:
 
     with fits.open(filepath) as hdul:
         data, header = _extract_cube_data(hdul)
+        err = _extract_err_data(hdul, data.shape)
+        dq = _extract_dq_data(hdul, data.shape)
         wavelength = _build_wavelength_axis(header, data.shape[0])
         metadata = _extract_metadata(header)
 
-    # Handle NaN/inf values in the data
+    # Clean NaNs in data and err arrays safely
     data = np.nan_to_num(data, nan=0.0, posinf=0.0, neginf=0.0)
+    if err is not None:
+        err = np.nan_to_num(err, nan=1e6, posinf=1e6, neginf=1e6)
+        # Avoid non-positive variances
+        err = np.clip(err, 1e-12, None)
 
     return SpectralCube(
         data=data,
         wavelength=wavelength,
         header=metadata,
         filepath=str(filepath),
+        err=err,
+        dq=dq,
     )
 
 
@@ -122,6 +133,42 @@ def _extract_cube_data(
         "Expected a data array with NAXIS=3. "
         f"Found HDU shapes: {', '.join(shapes)}"
     )
+
+
+def _extract_err_data(
+    hdul: fits.HDUList,
+    target_shape: tuple[int, int, int],
+) -> np.ndarray | None:
+    """Extract standard error/uncertainty array from FITS extensions."""
+    for name in ["ERR", "ERROR", "VAR_POISSON", "VAR_RNOISE", "ERRARR"]:
+        if name in hdul and hdul[name].data is not None:
+            err = np.squeeze(hdul[name].data).astype(np.float64)
+            if err.shape == target_shape:
+                if name.startswith("VAR_"):
+                    err = np.sqrt(np.maximum(0.0, err))
+                return err
+
+    # Check unnamed extensions
+    for ext in hdul:
+        if ext.name not in ["PRIMARY", "SCI"] and ext.data is not None:
+            arr = np.squeeze(ext.data).astype(np.float64)
+            if arr.shape == target_shape and "ERR" in ext.name.upper():
+                return arr
+
+    return None
+
+
+def _extract_dq_data(
+    hdul: fits.HDUList,
+    target_shape: tuple[int, int, int],
+) -> np.ndarray | None:
+    """Extract Data Quality bitmask array from FITS extensions."""
+    for name in ["DQ", "DQARR", "QUALITY"]:
+        if name in hdul and hdul[name].data is not None:
+            dq = np.squeeze(hdul[name].data).astype(np.int32)
+            if dq.shape == target_shape:
+                return dq
+    return None
 
 
 def _build_wavelength_axis(

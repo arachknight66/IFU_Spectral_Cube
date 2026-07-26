@@ -14,7 +14,10 @@ from __future__ import annotations
 import warnings
 
 import numpy as np
-from astropy.wcs import WCS
+try:
+    from astropy.wcs import WCS
+except ImportError:
+    WCS = None
 from scipy.ndimage import map_coordinates
 
 from src.core.cube import SpectralCube

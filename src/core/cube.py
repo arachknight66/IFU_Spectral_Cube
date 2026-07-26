@@ -54,6 +54,8 @@ class SpectralCube:
         wavelength: np.ndarray,
         header: dict[str, Any] | None = None,
         filepath: str = "",
+        err: np.ndarray | None = None,
+        dq: np.ndarray | None = None,
     ) -> None:
         if data.ndim != 3:
             raise ValueError(
@@ -68,11 +70,33 @@ class SpectralCube:
                 f"Wavelength length ({len(wavelength)}) does not match "
                 f"spectral axis ({data.shape[0]})"
             )
+        if err is not None:
+            if err.shape != data.shape:
+                raise ValueError(
+                    f"Error array shape {err.shape} does not match data shape {data.shape}"
+                )
+        if dq is not None:
+            if dq.shape != data.shape:
+                raise ValueError(
+                    f"Data Quality array shape {dq.shape} does not match data shape {data.shape}"
+                )
 
         self.data: np.ndarray = data
         self.wavelength: np.ndarray = wavelength
         self.header: dict[str, Any] = header or {}
         self.filepath: str = filepath
+        self.err: np.ndarray | None = err
+        self.dq: np.ndarray | None = dq
+
+    @property
+    def has_err(self) -> bool:
+        """True if standard uncertainty array is present."""
+        return self.err is not None
+
+    @property
+    def has_dq(self) -> bool:
+        """True if Data Quality flag array is present."""
+        return self.dq is not None
 
     # ------------------------------------------------------------------ #
     #  Properties
@@ -129,6 +153,36 @@ class SpectralCube:
                 f"spatial shape (nx={nx}, ny={ny})"
             )
         return self.data[:, y, x].copy()
+
+    def get_spectrum_err(self, x: int, y: int) -> np.ndarray | None:
+        """Extract the spectrum error array at a single spaxel position.
+
+        Returns None if no error array is present in the cube.
+        """
+        ny, nx = self.spatial_shape
+        if not (0 <= x < nx and 0 <= y < ny):
+            raise IndexError(
+                f"Pixel ({x}, {y}) out of bounds for cube with "
+                f"spatial shape (nx={nx}, ny={ny})"
+            )
+        if self.err is None:
+            return None
+        return self.err[:, y, x].copy()
+
+    def get_spectrum_dq(self, x: int, y: int) -> np.ndarray | None:
+        """Extract the Data Quality flag array at a single spaxel position.
+
+        Returns None if no DQ array is present in the cube.
+        """
+        ny, nx = self.spatial_shape
+        if not (0 <= x < nx and 0 <= y < ny):
+            raise IndexError(
+                f"Pixel ({x}, {y}) out of bounds for cube with "
+                f"spatial shape (nx={nx}, ny={ny})"
+            )
+        if self.dq is None:
+            return None
+        return self.dq[:, y, x].copy()
 
     def get_slice(self, index: int) -> np.ndarray:
         """Extract a 2D spatial image at a given wavelength channel.

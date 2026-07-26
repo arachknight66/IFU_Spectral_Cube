@@ -56,12 +56,16 @@ from scipy.ndimage import gaussian_filter1d
 # Primary filter: Savitzky-Golay
 # =========================================================================
 
+from scipy.signal import savgol_filter, savgol_coeffs
+
+
 def savgol_denoise(
     spectrum: np.ndarray,
     window_length: int = 11,
     polyorder: int = 3,
-) -> np.ndarray:
-    """Apply Savitzky-Golay smoothing to a 1D spectrum.
+    err: np.ndarray | None = None,
+) -> np.ndarray | tuple[np.ndarray, np.ndarray]:
+    """Apply Savitzky-Golay smoothing to a 1D spectrum with error propagation.
 
     Parameters
     ----------
@@ -69,28 +73,16 @@ def savgol_denoise(
         1D flux array to be smoothed.
     window_length : int
         Length of the filter window (must be odd and > polyorder).
-        Controls the trade-off between noise suppression and feature
-        preservation: larger windows suppress more noise but may
-        attenuate narrow features.
     polyorder : int
-        Order of the polynomial fit within each window. Higher orders
-        preserve more spectral detail but suppress less noise.
-        Recommended: 2 or 3 for emission line work.
+        Order of the polynomial fit within each window.
+    err : np.ndarray, optional
+        Standard uncertainty array corresponding to spectrum.
 
     Returns
     -------
-    np.ndarray
-        Smoothed spectrum of the same length.
-
-    Raises
-    ------
-    ValueError
-        If window_length is even, or polyorder >= window_length.
-
-    Notes
-    -----
-    For very short spectra (< window_length), the function falls back
-    to returning the input unchanged with a warning.
+    np.ndarray or tuple of (np.ndarray, np.ndarray)
+        If err is None, returns smoothed spectrum.
+        If err is provided, returns (smoothed_spectrum, smoothed_err).
     """
     if len(spectrum) < window_length:
         warnings.warn(
@@ -98,14 +90,32 @@ def savgol_denoise(
             f"({window_length}). Returning unsmoothed spectrum.",
             stacklevel=2,
         )
+        if err is not None:
+            return spectrum.copy(), err.copy()
         return spectrum.copy()
 
-    return savgol_filter(
+    smoothed_spectrum = savgol_filter(
         spectrum,
         window_length=window_length,
         polyorder=polyorder,
-        mode="nearest",  # Handle boundaries by extending nearest value
+        mode="nearest",
     )
+
+    if err is not None:
+        # Propagate error variance using SG convolution coefficients c_k
+        coeffs = savgol_coeffs(window_length, polyorder)
+        # Var(smoothed_i) = sum(c_k^2 * err_{i+k}^2)
+        var_smoothed = savgol_filter(
+            err ** 2,
+            window_length=window_length,
+            polyorder=polyorder,
+            mode="nearest",
+        )
+        # Ensure variance stays non-negative
+        smoothed_err = np.sqrt(np.maximum(1e-12, var_smoothed))
+        return smoothed_spectrum, smoothed_err
+
+    return smoothed_spectrum
 
 
 # =========================================================================

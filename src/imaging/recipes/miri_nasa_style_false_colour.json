@@ -1,0 +1,14 @@
+{
+  "name": "MIRI NASA-style enhanced false colour",
+  "target_name": "Replace with MAST target name",
+  "mast_search": null,
+  "expected_product": {"instrument": "MIRI", "product_type": "s3d", "observing_mode": "MRS IFU"},
+  "mapping_intent": "presentation",
+  "mapping_note": "The source bands remain [S IV], PAH 11.3, and [Ne III]; colours and balancing are intentionally chosen for visual separation rather than a direct physical RGB convention.",
+  "channels": [
+    {"feature_name": "[S IV] 10.51 µm", "central_wavelength_um": 10.51, "integration_width_um": 0.12, "continuum_subtraction": {"enabled": true, "method": "adjacent_sidebands", "sideband_width_um": 0.15, "gap_um": 0.06}, "display_colour": "blue"},
+    {"feature_name": "PAH 11.3 µm", "central_wavelength_um": 11.3, "integration_width_um": 0.35, "continuum_subtraction": {"enabled": true, "method": "local_linear_fit", "sideband_width_um": 0.22, "gap_um": 0.24}, "display_colour": "green"},
+    {"feature_name": "[Ne III] 15.55 µm", "central_wavelength_um": 15.55, "integration_width_um": 0.16, "continuum_subtraction": {"enabled": true, "method": "adjacent_sidebands", "sideband_width_um": 0.20, "gap_um": 0.08}, "display_colour": "red"}
+  ],
+  "rendering": {"stretch": "asinh", "percentile_clip": [0.5, 99.8], "background_subtraction": "per_channel_median", "colour_balance": "equalize_channels", "output_resolution": [2560, 2560], "output_filename": "miri_nasa_style_false_colour.png"}
+}

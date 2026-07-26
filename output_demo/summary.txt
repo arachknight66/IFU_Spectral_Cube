@@ -1,0 +1,50 @@
+===========================================================================
+JWST MIRI IFU Pipeline — Rigorous Physical Analysis Summary
+===========================================================================
+
+Source file:  synthetic
+Cube shape:   (500, 30, 30)
+Wavelength:   5.0000 – 28.0000 µm
+Pixel:        (15, 15)
+Errors present: True
+DQ present:    True
+
+--- Configuration ---
+SG window:    11
+SG polyorder: 3
+Continuum:    poly order 3, σ-clip=3.0
+Peak detect:  prominence=3.0, distance=5
+Line ID:      tolerance=0.05 µm, z=0.0
+
+--- Results ---
+Noise RMS:       5.698156e-01
+Peaks detected:  12
+Lines identified: 8
+
+--- Detected Peaks & Physical Line Parameters ---
+ #  λ_obs (µm)     SNR       Species     Rest λ             Flux (±err)   χ²_red      σ_v (km/s)
+------------------------------------------------------------------------------------------
+ 1      9.0100     9.0      [Ar III]     8.9910       9.912e-01±1.5e-01     0.89    3030.2±534.5
+ 2      9.7014     7.7            H₂     9.6650       6.160e-01±1.4e-01     0.83    2390.3±631.0
+ 3     10.5311    11.2        [S IV]    10.5110       1.304e+00±1.6e-01     1.92    2567.7±353.2
+ 4     11.3146    61.9           PAH    11.3000       1.356e+01±2.7e-01     0.24     4246.8±89.8
+ 5     12.2826     5.1            H₂    12.2790       8.183e-01±3.3e-01     1.08    1128.3±483.8
+ 6     12.8357    16.5       [Ne II]    12.8140       1.952e+00±1.6e-01     1.23    2081.1±196.8
+ 7     17.0301    12.6            H₂    17.0350       1.405e+00±1.6e-01     0.92    1632.9±217.3
+ 8     18.0902     4.3             —          —       2.642e-01±1.6e-01     0.46   1626.6±1125.2
+ 9     18.6894    17.4       [S III]    18.7130       2.159e+00±1.7e-01     0.81    1474.2±131.2
+10     19.3808     4.1             —          —       3.155e-01±1.6e-01     0.23    1484.6±854.7
+11     24.4048     3.1             —          —       1.770e-01±1.4e-01     0.16     876.8±796.2
+12     25.5571     3.5             —          —       1.541e-01±1.3e-01     0.09     693.9±666.3
+
+Images generated: 10
+  • slice_16.52um
+  • full_band_integrated
+  • emission_[Ar III]_8.99
+  • emission_H₂_9.66
+  • emission_[S IV]_10.51
+  • emission_PAH_11.30
+  • emission_H₂_12.28
+  • emission_[Ne II]_12.81
+  • emission_H₂_17.04
+  • emission_[S III]_18.71

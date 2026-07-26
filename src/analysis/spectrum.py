@@ -51,35 +51,48 @@ def extract_spectrum(
         config = PipelineConfig()
 
     raw = cube.get_spectrum(x, y)
+    raw_err = cube.get_spectrum_err(x, y)
     wavelength = cube.wavelength.copy()
+
+    if raw_err is None:
+        # Fallback noise estimate using MAD
+        mad = np.nanmedian(np.abs(raw - np.nanmedian(raw)))
+        raw_err = np.full_like(raw, max(1e-12, 1.4826 * mad))
 
     result = {
         "wavelength": wavelength,
         "raw": raw,
+        "raw_err": raw_err,
     }
 
     if preprocess:
-        # Step 1: Denoise
-        denoised = savgol_denoise(
+        # Step 1: Denoise with error propagation
+        denoised, denoised_err = savgol_denoise(
             raw,
             window_length=config.savgol_window,
             polyorder=config.savgol_polyorder,
+            err=raw_err,
         )
         result["denoised"] = denoised
+        result["denoised_err"] = denoised_err
 
-        # Step 2: Continuum subtraction
-        continuum_sub, continuum = subtract_continuum(
+        # Step 2: Continuum subtraction with error propagation
+        continuum_sub, continuum, processed_err = subtract_continuum(
             wavelength,
             denoised,
             poly_order=config.continuum_poly_order,
             sigma_clip=config.sigma_clip,
+            err=denoised_err,
         )
         result["continuum"] = continuum
         result["processed"] = continuum_sub
+        result["processed_err"] = processed_err
     else:
         result["denoised"] = raw.copy()
+        result["denoised_err"] = raw_err.copy()
         result["continuum"] = np.zeros_like(raw)
         result["processed"] = raw.copy()
+        result["processed_err"] = raw_err.copy()
 
     return result
 

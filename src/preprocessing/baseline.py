@@ -34,37 +34,30 @@ def subtract_continuum(
     poly_order: int = 3,
     sigma_clip: float = 3.0,
     max_iterations: int = 10,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Estimate and subtract the continuum from a 1D spectrum.
+    err: np.ndarray | None = None,
+) -> tuple[np.ndarray, np.ndarray] | tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Estimate and subtract the continuum from a 1D spectrum with error propagation.
 
     Parameters
     ----------
     wavelength : np.ndarray
-        1D wavelength axis (used as the independent variable for fitting).
+        1D wavelength axis.
     spectrum : np.ndarray
         1D flux array.
     poly_order : int
-        Degree of the polynomial continuum model. Order 1–2 for smooth
-        continua (e.g., evolved stars); order 3–5 for complex shapes
-        (embedded protostars, AGN).
+        Degree of the polynomial continuum model.
     sigma_clip : float
-        Number of standard deviations for iterative clipping. Higher
-        values retain more points but risk fitting emission features
-        into the continuum.
+        Number of standard deviations for iterative clipping.
     max_iterations : int
         Maximum number of sigma-clipping iterations.
+    err : np.ndarray, optional
+        Standard uncertainty array corresponding to spectrum.
 
     Returns
     -------
-    tuple of (continuum_subtracted, continuum)
-        - continuum_subtracted : spectrum with continuum removed
-        - continuum : the estimated continuum model
-
-    Notes
-    -----
-    The wavelength axis is normalized to [0, 1] before fitting to
-    improve numerical conditioning of the polynomial fit, especially
-    at high orders.
+    tuple
+        If err is None: (continuum_subtracted, continuum)
+        If err is provided: (continuum_subtracted, continuum, processed_err)
     """
     # Normalize wavelength for numerical stability
     wl_min, wl_max = wavelength.min(), wavelength.max()
@@ -76,27 +69,40 @@ def subtract_continuum(
 
     # Initialize mask: True = include in fit
     mask = np.isfinite(spectrum)
+    if err is not None:
+        mask = mask & np.isfinite(err) & (err > 0)
+
+    coeffs = None
+    cov = None
+    weights = None
 
     for _ in range(max_iterations):
         if np.sum(mask) < poly_order + 1:
-            # Not enough points for fit — return zeros
             break
 
+        if err is not None:
+            weights = 1.0 / err[mask]
+        else:
+            weights = None
+
         # Fit polynomial to unmasked points
-        coeffs = np.polyfit(wl_norm[mask], spectrum[mask], poly_order)
+        coeffs, cov = np.polyfit(wl_norm[mask], spectrum[mask], poly_order, w=weights, cov=True)
         continuum = np.polyval(coeffs, wl_norm)
 
         # Compute residuals
         residuals = spectrum - continuum
-        sigma = np.std(residuals[mask])
+        if err is not None:
+            norm_residuals = residuals / np.maximum(1e-12, err)
+            sigma = np.std(norm_residuals[mask])
+            if sigma == 0:
+                break
+            new_mask = mask & (np.abs(norm_residuals) < sigma_clip * max(1.0, sigma))
+        else:
+            sigma = np.std(residuals[mask])
+            if sigma == 0:
+                break
+            new_mask = mask & (np.abs(residuals) < sigma_clip * sigma)
 
-        if sigma == 0:
-            break
-
-        # Update mask: clip points with |residual| > sigma_clip * sigma
-        new_mask = mask & (np.abs(residuals) < sigma_clip * sigma)
-
-        # Check convergence
         if np.array_equal(new_mask, mask):
             break
 
@@ -104,13 +110,29 @@ def subtract_continuum(
 
     # Final fit
     if np.sum(mask) >= poly_order + 1:
-        coeffs = np.polyfit(wl_norm[mask], spectrum[mask], poly_order)
+        if err is not None:
+            weights = 1.0 / err[mask]
+        else:
+            weights = None
+        coeffs, cov = np.polyfit(wl_norm[mask], spectrum[mask], poly_order, w=weights, cov=True)
         continuum = np.polyval(coeffs, wl_norm)
     else:
-        # Fallback: use median as flat continuum
         continuum = np.full_like(spectrum, np.nanmedian(spectrum))
     
     continuum_subtracted = spectrum - continuum
+
+    if err is not None:
+        # Variance of polynomial evaluation: Var(c_p x^p + ...)
+        if cov is not None:
+            V = np.vander(wl_norm, poly_order + 1)
+            # Var(cont_i) = sum_j sum_k V_ij V_ik Cov_jk
+            cont_var = np.einsum('ij,jk,ik->i', V, cov, V)
+            cont_var = np.maximum(0.0, cont_var)
+        else:
+            cont_var = np.zeros_like(spectrum)
+        
+        processed_err = np.sqrt(err ** 2 + cont_var)
+        return continuum_subtracted, continuum, processed_err
 
     return continuum_subtracted, continuum
 

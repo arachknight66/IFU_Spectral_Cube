@@ -219,14 +219,21 @@ st.markdown("""
 with st.sidebar:
     st.markdown("### 📁 Data Source")
 
+    if st.button("🦀 1-Click Load & Render Crab Nebula (M1)", type="primary", use_container_width=True):
+        from scripts.generate_crab_fits import create_crab_nebula_fits_file
+        crab_path = create_crab_nebula_fits_file("data/crab_nebula_miri_composite.fits")
+        st.session_state["crab_active"] = True
+        st.session_state["crab_path"] = crab_path
+
     data_source = st.radio(
         "Source",
-        ["🧪 Synthetic Test Cube", "📂 Upload FITS File", "📁 Load from Directory"],
+        ["🦀 Crab Nebula (M1) Dedicated FITS", "🧪 Synthetic Test Cube", "📂 Upload FITS File", "📁 Load from Directory", "🛰️ Search MAST Archive"],
         label_visibility="collapsed",
     )
 
     uploaded_files = []
     local_fits_path = None
+    mast_fits_path = None
 
     if data_source == "📂 Upload FITS File":
         uploaded_files = st.file_uploader(
@@ -249,6 +256,59 @@ with st.sidebar:
                 st.info("No FITS files found in `data/raw/`")
         else:
             st.info("Directory `data/raw/` does not exist")
+    elif data_source == "🌌 Wide-Field FITS Mosaic Mode":
+        st.markdown("#### Wide-Field FITS Mosaic Stacking")
+        target_mos = st.selectbox("Select Target Footprint", ["Crab Nebula (M1)", "Stephan's Quintet (NGC 7319)", "Cat's Eye Nebula (NGC 6543)"])
+        
+        from src.core.mast import download_mast_mosaic_set
+        if st.button("📥 Fetch & Stitch Multi-Tile Mosaic Set", use_container_width=True):
+            with st.spinner("Downloading 4 overlapping pointing FITS tiles from MAST..."):
+                mosaic_tiles = download_mast_mosaic_set(target_name=target_mos, output_dir="data/mosaics")
+            st.success(f"Stitched {len(mosaic_tiles)} pointing tiles across target footprint!")
+            st.session_state["mosaic_tiles"] = mosaic_tiles
+
+        if "mosaic_tiles" in st.session_state and st.session_state["mosaic_tiles"]:
+            mast_fits_path = st.session_state["mosaic_tiles"][0]
+    elif data_source == "🛰️ Search MAST Archive":
+        st.markdown("#### MAST JWST Archive Search")
+        search_mode = st.radio("Search Mode", ["🎯 Target / Proposal", "🌐 RA / Dec Coordinates"], label_visibility="collapsed")
+        
+        from src.core.mast import search_mast_jwst, download_mast_product
+
+        if search_mode == "🎯 Target / Proposal":
+            target_input = st.text_input("Target Name", value="NGC 7319", help="e.g. NGC 7319, Stephan's Quintet, NGC 6543")
+            proposal_input = st.text_input("Proposal ID (Optional)", value="", help="e.g. 1288")
+            mast_results = search_mast_jwst(target_name=target_input, proposal_id=proposal_input or None, limit=5)
+        else:
+            if st.button("🦀 Quick Load Crab Nebula (M1)", use_container_width=True):
+                st.session_state["ra_val"] = "83.6331"
+                st.session_state["dec_val"] = "22.0145"
+
+            col_ra, col_dec = st.columns(2)
+            with col_ra:
+                ra_input = st.text_input("RA", value=st.session_state.get("ra_val", "83.6331"), help="RA in deg or sexagesimal e.g. 83.6331")
+            with col_dec:
+                dec_input = st.text_input("Dec", value=st.session_state.get("dec_val", "22.0145"), help="Dec in deg or sexagesimal e.g. +22.0145")
+            radius_input = st.slider("Search Radius (arcsec)", 1.0, 60.0, 30.0, 1.0)
+            
+            try:
+                mast_results = search_mast_jwst(ra=ra_input, dec=dec_input, radius_arcsec=radius_input, limit=5)
+            except Exception as e_coord:
+                st.error(f"Invalid coordinates: {str(e_coord)}")
+                mast_results = []
+
+        if mast_results:
+            selected_rec = st.selectbox(
+                "Select Product",
+                mast_results,
+                format_func=lambda r: f"{r['target_name']} | {r['submode']} ({r['product_filename']})",
+            )
+            if st.button("📥 Download & Analyze Cube", use_container_width=True):
+                with st.spinner(f"Downloading {selected_rec['product_filename']} from MAST..."):
+                    mast_fits_path = download_mast_product(selected_rec['download_url'], selected_rec['product_filename'])
+                st.success(f"Downloaded to {mast_fits_path.name}")
+        else:
+            st.warning("No MIRI IFU observations found for search terms.")
 
     st.markdown("---")
     st.markdown("### ⚙️ Preprocessing")
@@ -381,7 +441,13 @@ def load_from_path(path: str):
 
 cube: SpectralCube | None = None
 
-if data_source == "🧪 Synthetic Test Cube":
+if data_source == "🦀 Crab Nebula (M1) Dedicated FITS" or st.session_state.get("crab_active"):
+    crab_f = Path("data/crab_nebula_miri_composite.fits")
+    if not crab_f.exists():
+        from scripts.generate_crab_fits import create_crab_nebula_fits_file
+        crab_f = create_crab_nebula_fits_file("data/crab_nebula_miri_composite.fits")
+    cube = load_from_path(str(crab_f))
+elif data_source == "🧪 Synthetic Test Cube":
     cube = load_synthetic()
 elif data_source == "📂 Upload FITS File" and uploaded_files:
     files_data = [(f.getvalue(), f.name) for f in uploaded_files]
@@ -390,6 +456,15 @@ elif data_source == "📂 Upload FITS File" and uploaded_files:
     cube = load_uploaded_files(files_data)
 elif data_source == "📁 Load from Directory" and local_fits_path is not None:
     cube = load_from_path(str(local_fits_path))
+elif data_source in ("🛰️ Search MAST Archive", "🌌 Wide-Field FITS Mosaic Mode"):
+    if mast_fits_path is not None and mast_fits_path.exists():
+        cube = load_from_path(str(mast_fits_path))
+    else:
+        raw_dir = Path("data/mosaics") if data_source == "🌌 Wide-Field FITS Mosaic Mode" else Path("data/raw")
+        if raw_dir.exists():
+            fits_files = sorted(raw_dir.glob("*.fits"))
+            if fits_files:
+                cube = load_from_path(str(fits_files[0]))
 
 
 if cube is None:
@@ -423,6 +498,7 @@ def run_analysis(_cube, x, y, _config):
     return p.analyze(_cube, x, y)
 
 analysis = run_analysis(cube, int(px), int(py), config)
+images = pipeline.generate_images(cube, analysis.line_matches)
 
 
 # ===========================================================================
@@ -467,9 +543,10 @@ with c5:
 # ===========================================================================
 # Main panel — tabbed layout
 # ===========================================================================
-tab_spec, tab_img, tab_summary = st.tabs([
+tab_spec, tab_img, tab_nasa, tab_summary = st.tabs([
     "📊 Spectrum Analysis",
     "🖼️ Imaging",
+    "🎨 NASA Photo Studio",
     "📋 Summary & Export",
 ])
 
@@ -640,7 +717,109 @@ with tab_img:
                         st.warning(str(e))
 
 
-# ===== Tab 3: Summary & Export ==============================================
+# ===== Tab 3: NASA Photo Studio =============================================
+with tab_nasa:
+    st.markdown("### 🎨 NASA / STScI Press-Release Photograph Studio")
+    st.markdown(
+        "Synthesize high-definition false-color RGB photographs combining multiple spectral lines "
+        "with sub-pixel spatial super-resolution and non-linear `asinh` dynamic range scaling."
+    )
+
+    from src.visualization.super_res import upsample_spatial_grid, apply_asinh_stretch
+    from src.visualization.rgb import create_rgb_composite, CHEMICAL_PRESETS
+    from src.visualization.nasa_plot import render_nasa_photo
+
+    available_imgs: dict[str, np.ndarray] = images.copy()
+
+    # Automatically derive 3 distinct multi-spectral bands from real FITS data
+    if hasattr(cube, "data") and cube.n_wavelengths >= 3:
+        w_len = cube.n_wavelengths
+        available_imgs["🔵 Short-Wavelength Band"] = np.mean(cube.data[:w_len // 3], axis=0)
+        available_imgs["🟢 Mid-Wavelength Band"] = np.mean(cube.data[w_len // 3: 2 * w_len // 3], axis=0)
+        available_imgs["🔴 Long-Wavelength Band"] = np.mean(cube.data[2 * w_len // 3:], axis=0)
+
+    is_crab = "crab" in str(getattr(cube, "filepath", "")).lower()
+
+    col_preset, col_title = st.columns([1, 1])
+    with col_preset:
+        preset_name = st.selectbox("Preset Chemical Recipe", ["Custom Assignment"] + list(CHEMICAL_PRESETS.keys()))
+    with col_title:
+        default_title = "JWST MIRI MRS — CRAB NEBULA (M1 / NGC 1952)" if is_crab else (cube.filepath if hasattr(cube, 'filepath') else 'JWST MIRI IFU FITS Data')
+        target_title = st.text_input("Photograph Title", value=default_title)
+
+    img_keys = list(available_imgs.keys())
+
+    if is_crab:
+        r_key = "🔴 Long-Wavelength Band" if "🔴 Long-Wavelength Band" in available_imgs else img_keys[0]
+        g_key = "🟢 Mid-Wavelength Band" if "🟢 Mid-Wavelength Band" in available_imgs else img_keys[0]
+        b_key = "🔵 Short-Wavelength Band" if "🔵 Short-Wavelength Band" in available_imgs else img_keys[0]
+    elif preset_name != "Custom Assignment":
+        recipe = CHEMICAL_PRESETS[preset_name]
+        st.info(recipe["description"])
+        r_key = recipe["red"] if recipe["red"] in available_imgs else img_keys[0]
+        g_key = recipe["green"] if recipe["green"] in available_imgs else (img_keys[1] if len(img_keys) > 1 else img_keys[0])
+        b_key = recipe["blue"] if recipe["blue"] in available_imgs else (img_keys[2] if len(img_keys) > 2 else img_keys[0])
+    else:
+        r_key = img_keys[0]
+        g_key = img_keys[1] if len(img_keys) > 1 else img_keys[0]
+        b_key = img_keys[2] if len(img_keys) > 2 else img_keys[0]
+
+    ch_col1, ch_col2, ch_col3 = st.columns(3)
+    with ch_col1:
+        sel_r = st.selectbox("🔴 Red Channel", img_keys, index=img_keys.index(r_key) if r_key in img_keys else 0)
+    with ch_col2:
+        sel_g = st.selectbox("🟢 Green Channel", img_keys, index=img_keys.index(g_key) if g_key in img_keys else 0)
+    with ch_col3:
+        sel_b = st.selectbox("🔵 Blue Channel", img_keys, index=img_keys.index(b_key) if b_key in img_keys else 0)
+
+    tune_col1, tune_col2, tune_col3, tune_col4, tune_col5 = st.columns(5)
+    with tune_col1:
+        super_res_f = st.slider("Super-Res Factor", 1, 15, 10, help="Sub-pixel spatial upsampling (10x -> 300x300)")
+    with tune_col2:
+        stretch_mode = st.selectbox("Intensity Stretch", ["asinh", "log", "linear"])
+    with tune_col3:
+        sat_val = st.slider("Color Saturation", 0.5, 2.5, 1.4, 0.1)
+    with tune_col4:
+        gamma_val = st.slider("Gamma Correction", 0.5, 2.0, 1.0, 0.1)
+    with tune_col5:
+        unsharp_val = st.slider("Filament Sharpening", 0.0, 2.0, 0.8, 0.1, help="Unsharp masking for fine tendrils")
+
+    r_arr = available_imgs[sel_r]
+    g_arr = available_imgs[sel_g]
+    b_arr = available_imgs[sel_b]
+
+    rgb_hd = create_rgb_composite(
+        r_arr, g_arr, b_arr,
+        stretch=stretch_mode,
+        saturation=sat_val,
+        gamma=gamma_val,
+        super_res_factor=super_res_f,
+        unsharp_mask_amount=unsharp_val,
+    )
+
+    fig_nasa = render_nasa_photo(
+        rgb_hd,
+        title=str(target_title),
+        target_name="JWST MIRI MRS",
+        channel_labels={"red": sel_r, "green": sel_g, "blue": sel_b},
+        scale_bar_arcsec=1.0,
+        show_compass=True,
+    )
+
+    st.pyplot(fig_nasa, use_container_width=True)
+
+    img_buf = io.BytesIO()
+    fig_nasa.savefig(img_buf, format="png", dpi=300, bbox_inches="tight", facecolor="black")
+    st.download_button(
+        "📥 Download High-Resolution NASA Photograph (300 DPI PNG)",
+        img_buf.getvalue(),
+        file_name="jwst_miri_nasa_photo.png",
+        mime="image/png",
+    )
+    plt.close(fig_nasa)
+
+
+# ===== Tab 4: Summary & Export ==============================================
 with tab_summary:
     st.markdown("#### FITS Metadata")
 
