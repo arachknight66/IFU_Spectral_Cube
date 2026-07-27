@@ -47,3 +47,7 @@ def test_placeholder_is_explicit(tmp_path):
     path=_write_cube(tmp_path/"nowcs.fits",valid_wcs=False)
     with pytest.raises(CubeLoadError): load_fits_cube(path)
     assert load_fits_cube(path,allow_placeholder_wavelength=True).validation_report.wcs_status.startswith("placeholder")
+
+def test_gzip_fits_is_supported(tmp_path):
+    cube=load_fits_cube(_write_cube(tmp_path/"cube_s3d.fits.gz"))
+    assert cube.shape==(3,2,4)

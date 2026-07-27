@@ -115,29 +115,54 @@ class SpectralPipeline:
         """
         return load_fits_cube(filepath)
 
-    def load_multiple(self, filepaths: list[str | Path]) -> SpectralCube:
+    def align_cubes(
+        self,
+        cubes: list[SpectralCube],
+        config: Any = None,
+    ) -> Any:
+        """Align, reproject, and combine multiple spectral cubes with uncertainty propagation.
+
+        Parameters
+        ----------
+        cubes : list of SpectralCube
+            Input cubes to align.
+        config : AlignmentConfig, optional
+            Alignment configuration.
+
+        Returns
+        -------
+        AlignmentResult
+            Structured result containing aligned SpectralCube, WCS, coverage map,
+            uncertainty, DQ, and provenance.
+        """
+        from src.core.stitch import align_and_stitch_cubes
+        return align_and_stitch_cubes(cubes, config=config)
+
+    def load_multiple(
+        self,
+        filepaths: list[str | Path],
+        config: Any = None,
+    ) -> SpectralCube:
         """Load and stitch multiple FITS spectral cubes.
 
         Parameters
         ----------
         filepaths : list of str or Path
             Paths to the FITS files.
+        config : AlignmentConfig, optional
+            Alignment configuration.
 
         Returns
         -------
         SpectralCube
-            A single, combined (stitched) data cube.
+            A single, combined (stitched/mosaicked) data cube.
         """
         if not filepaths:
             raise ValueError("No files provided for loading.")
 
         cubes = [self.load(f) for f in filepaths]
-
-        if len(cubes) == 1:
-            return cubes[0]
-
-        from src.core.stitch import stitch_cubes
-        return stitch_cubes(cubes, reference_index=0)
+        res = self.align_cubes(cubes, config=config)
+        return res.aligned_cube
 
     # ------------------------------------------------------------------ #
     #  Stage 2: Preprocess
@@ -278,8 +303,119 @@ class SpectralPipeline:
         )
 
     # ------------------------------------------------------------------ #
-    #  Stage 5: Generate images
+    #  Stage 5: Generate images & component maps
     # ------------------------------------------------------------------ #
+
+    def extract_component_map(
+        self,
+        cube: SpectralCube,
+        central_wavelength_um: float,
+        integration_width_um: float,
+        *,
+        feature_name: str = "feature",
+        continuum_subtraction: Any = None,
+        allow_one_sided_continuum: bool = False,
+        recipe_channel: str | None = None,
+    ) -> Any:
+        """Extract a 2D continuum-subtracted component map with uncertainty and SNR.
+
+        Parameters
+        ----------
+        cube : SpectralCube
+            Input data cube.
+        central_wavelength_um : float
+            Central wavelength in µm.
+        integration_width_um : float
+            Integration width in µm.
+        feature_name : str
+            Name of feature.
+        continuum_subtraction : dict or ContinuumSubtraction, optional
+            Continuum settings.
+        allow_one_sided_continuum : bool
+            Permit one-sided continuum.
+        recipe_channel : str, optional
+            RGB channel assignment ('red', 'green', 'blue').
+
+        Returns
+        -------
+        ComponentMap
+        """
+        from src.imaging.component_map import extract_component_map
+        return extract_component_map(
+            cube,
+            central_wavelength_um=central_wavelength_um,
+            integration_width_um=integration_width_um,
+            feature_name=feature_name,
+            continuum_subtraction=continuum_subtraction,
+            allow_one_sided_continuum=allow_one_sided_continuum,
+            recipe_channel=recipe_channel,
+        )
+
+    def extract_recipe_component_maps(
+        self,
+        cube: SpectralCube,
+        recipe: Any,
+        *,
+        allow_one_sided_continuum: bool = False,
+    ) -> dict[str, Any]:
+        """Extract component maps for all 3 RGB channels defined in an ImageRecipe.
+
+        Parameters
+        ----------
+        cube : SpectralCube
+            Input data cube.
+        recipe : ImageRecipe
+            Phase 1 RGB Image Recipe.
+        allow_one_sided_continuum : bool
+            Permit one-sided continuum.
+
+        Returns
+        -------
+        dict of str -> ComponentMap
+        """
+        from src.imaging.component_map import extract_recipe_component_maps
+        return extract_recipe_component_maps(cube, recipe, allow_one_sided_continuum=allow_one_sided_continuum)
+
+    # ------------------------------------------------------------------ #
+    #  Stage 6: Render false-colour image
+    # ------------------------------------------------------------------ #
+
+    def render_false_color(
+        self,
+        component_maps: Any,
+        recipe: Any,
+        rendering_mode: str = "scientific",
+        rendering_overrides: Any = None,
+        overwrite: bool = False,
+    ) -> Any:
+        """Combine 3 Phase-5 ComponentMaps into a false-colour RGB image.
+
+        Parameters
+        ----------
+        component_maps : dict or Sequence of ComponentMap
+            Input 3-channel component maps ('red', 'green', 'blue').
+        recipe : ImageRecipe
+            Phase 1 RGB Image Recipe.
+        rendering_mode : 'scientific' or 'presentation'
+            Rendering mode.
+        rendering_overrides : dict, optional
+            Optional overrides.
+        overwrite : bool
+            Allow overwriting.
+
+        Returns
+        -------
+        FalseColorResult
+        """
+        from src.visualization.false_color import render_false_color
+        return render_false_color(
+            component_maps=component_maps,
+            recipe=recipe,
+            rendering_mode=rendering_mode,
+            rendering_overrides=rendering_overrides,
+            overwrite=overwrite,
+        )
+
 
     def generate_images(
         self,

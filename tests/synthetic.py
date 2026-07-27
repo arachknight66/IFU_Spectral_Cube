@@ -133,21 +133,41 @@ def generate_synthetic_cube(
     dq[10, 5, 5] = 1   # DO_NOT_USE bit flag
     dq[20, 15, 15] = 2  # SATURATED bit flag
 
+    from astropy.wcs import WCS
+
+    header = {
+        "TELESCOP": "JWST",
+        "INSTRUME": "MIRI",
+        "DETECTOR": "SYNTHETIC",
+        "NAXIS1": nx,
+        "NAXIS2": ny,
+        "NAXIS3": n_wavelength,
+        "CRVAL1": 150.0,
+        "CRVAL2": 2.0,
+        "CRPIX1": nx / 2.0 + 0.5,
+        "CRPIX2": ny / 2.0 + 0.5,
+        "CDELT1": -0.0001,
+        "CDELT2": 0.0001,
+        "CTYPE1": "RA---TAN",
+        "CTYPE2": "DEC--TAN",
+        "CRVAL3": wl_start,
+        "CDELT3": (wl_end - wl_start) / n_wavelength,
+        "CUNIT3": "um",
+        "BUNIT": "MJy/sr",
+    }
+
+    wcs_3d = WCS(naxis=3)
+    wcs_3d.wcs.crval = [150.0, 2.0, wl_start]
+    wcs_3d.wcs.crpix = [nx / 2.0 + 0.5, ny / 2.0 + 0.5, 1.0]
+    wcs_3d.wcs.cdelt = [-0.0001, 0.0001, (wl_end - wl_start) / n_wavelength]
+    wcs_3d.wcs.ctype = ["RA---TAN", "DEC--TAN", "WAVE"]
+
     return SpectralCube(
         data=data,
         wavelength=wavelength,
-        header={
-            "TELESCOP": "JWST",
-            "INSTRUME": "MIRI",
-            "DETECTOR": "SYNTHETIC",
-            "NAXIS1": nx,
-            "NAXIS2": ny,
-            "NAXIS3": n_wavelength,
-            "CRVAL3": wl_start,
-            "CDELT3": (wl_end - wl_start) / n_wavelength,
-            "CUNIT3": "um",
-            "BUNIT": "MJy/sr",
-        },
+        header=header,
+        wcs=wcs_3d,
+        flux_unit="MJy/sr",
         filepath="synthetic",
         err=err,
         dq=dq,

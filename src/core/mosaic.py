@@ -8,15 +8,19 @@ celestial coordinate grid (RA/Dec WCS) to construct true wide-field astronomical
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 import numpy as np
 from astropy.io import fits
 
 try:
     from astropy.wcs import WCS
     HAS_WCS = True
-except ImportError:
+except ImportError:  # pragma: no cover
+    WCS = None
     HAS_WCS = False
+
+from src.core.cube import SpectralCube
+from src.core.stitch import align_and_stitch_cubes, AlignmentConfig, AlignmentResult
 
 
 def build_master_wcs(
@@ -51,7 +55,7 @@ def build_master_wcs(
                         wcs_hdr = WCS(hdu.header, naxis=2)
                         h, w = hdu.data.shape[-2:]
                         corners = wcs_hdr.pixel_to_world_values(
-                            [0, w, w, 0], [0, 0, h, h]
+                            [0, w - 1, w - 1, 0], [0, 0, h - 1, h - 1]
                         )
                         ras = corners[0]
                         decs = corners[1]
@@ -66,7 +70,6 @@ def build_master_wcs(
     if ra_min >= ra_max or dec_min >= dec_max:
         return None, (300, 300)
 
-    # Center RA & Dec
     center_ra = (ra_min + ra_max) / 2.0
     center_dec = (dec_min + dec_max) / 2.0
 
@@ -126,7 +129,6 @@ def reproject_and_drizzle_mosaic(
                 tile_h, tile_w = img_2d.shape
 
                 if wcs_tile is not None and master_wcs is not None:
-                    # Project tile pixel coordinates into master canvas pixel coordinates
                     grid_y, grid_x = np.mgrid[0:tile_h, 0:tile_w]
                     world_ras, world_decs = wcs_tile.pixel_to_world_values(grid_x.ravel(), grid_y.ravel())
                     canvas_x, canvas_y = master_wcs.world_to_pixel_values(world_ras, world_decs)
@@ -143,7 +145,6 @@ def reproject_and_drizzle_mosaic(
                     canvas[canvas_y[valid], canvas_x[valid]] += img_2d.ravel()[valid]
                     weights[canvas_y[valid], canvas_x[valid]] += 1.0
                 else:
-                    # Fallback tile placement
                     canvas[:tile_h, :tile_w] += img_2d
                     weights[:tile_h, :tile_w] += 1.0
         except Exception:
