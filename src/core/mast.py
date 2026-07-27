@@ -1,408 +1,353 @@
-"""
-STScI MAST Archive Interface for JWST MIRI IFU Data.
+"""Reliable MAST discovery and download support for JWST MIRI MRS cubes.
 
-Provides functions to search for and download Level-3 (`s3d`) MIRI IFU
-spectral data cubes directly from the Mikulski Archive for Space Telescopes (MAST).
-
-Features:
-    - Search by target name (e.g. "NGC 7319", "Stephan's Quintet", "NGC 6543")
-    - Search by JWST proposal ID (e.g. "1288", "1243")
-    - Direct download of s3d data cubes into local data cache (`data/raw/`)
-    - Resilient query strategy (astroquery + REST API fallback)
+Archive operations never fabricate observations or FITS products.  Synthetic
+test cubes remain in :mod:`tests.synthetic` and are only used by explicit demo
+commands outside this module.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
+import re
+import tempfile
+import time
 import urllib.parse
 import urllib.request
+from dataclasses import asdict, dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable, Mapping
 
-# Optional import of astroquery
 try:
     from astroquery.mast import Observations
-    HAS_ASTROQUERY = True
-except ImportError:
-    HAS_ASTROQUERY = False
-
+    import astroquery
+except ImportError:  # pragma: no cover - exercised when optional dependency missing
+    Observations = None  # type: ignore[assignment]
+    astroquery = None  # type: ignore[assignment]
 
 try:
+    from astropy.io import fits
     from astropy.coordinates import SkyCoord
     import astropy.units as u
-    HAS_ASTROPY_COORDS = True
-except ImportError:
-    HAS_ASTROPY_COORDS = False
+    import astropy
+except ImportError:  # pragma: no cover
+    fits = None  # type: ignore[assignment]
+    SkyCoord = None  # type: ignore[assignment]
+    u = None  # type: ignore[assignment]
+    astropy = None  # type: ignore[assignment]
+
+
+MAST_INVOKE_URL = "https://mast.stsci.edu/api/v0/invoke"
+MAST_DOWNLOAD_URL = "https://mast.stsci.edu/api/v0/download/file"
+_SAFE_FILENAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*_s3d\.fits(?:\.gz)?$", re.IGNORECASE)
+
+
+class MastError(RuntimeError):
+    """Base class for an honest MAST archive failure."""
+
+
+class MastQueryError(MastError):
+    """MAST could not perform or return a trustworthy query."""
+
+
+class ProductSelectionError(MastError):
+    """A candidate cannot be used as a public MIRI MRS Level-3 cube."""
+
+
+class MastDownloadError(MastError):
+    """A product could not be safely cached and verified."""
+
+
+@dataclass(frozen=True)
+class MastQuery:
+    target_name: str | None = None
+    proposal_id: str | None = None
+    observation_id: str | None = None
+    ra_deg: float | None = None
+    dec_deg: float | None = None
+    radius_arcsec: float = 10.0
+    limit: int = 25
+
+    def __post_init__(self) -> None:
+        if not any((self.target_name, self.proposal_id, self.observation_id, self.ra_deg is not None and self.dec_deg is not None)):
+            raise ValueError("provide target_name, proposal_id, observation_id, or both ra_deg and dec_deg")
+        if (self.ra_deg is None) != (self.dec_deg is None):
+            raise ValueError("RA and Dec must be supplied together")
+        if self.ra_deg is not None and not (0 <= self.ra_deg < 360 and -90 <= self.dec_deg <= 90):
+            raise ValueError("RA must be in [0, 360) and Dec in [-90, 90]")
+        if self.radius_arcsec <= 0 or self.limit <= 0:
+            raise ValueError("radius_arcsec and limit must be positive")
+
+
+@dataclass(frozen=True)
+class MastProduct:
+    observation_id: str
+    program_id: str | None
+    target_name: str | None
+    instrument: str | None
+    mode: str | None
+    product_filename: str
+    mast_uri: str
+    download_url: str
+    release_status: str
+    metadata: dict[str, Any] = field(default_factory=dict)
+    checksum: str | None = None
+
+    @property
+    def obs_id(self) -> str:  # Compatibility for current callers.
+        return self.observation_id
+
+    @property
+    def proposal_id(self) -> str | None:
+        return self.program_id
+
+    @property
+    def submode(self) -> str:
+        return self.mode or "MIRI MRS IFU"
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self) | {"obs_id": self.observation_id, "proposal_id": self.program_id, "submode": self.submode}
 
 
 def parse_coordinates(ra: float | str, dec: float | str) -> tuple[float, float]:
-    """Parse RA and Dec values from floats or sexagesimal strings into decimal degrees."""
-    if HAS_ASTROPY_COORDS and (isinstance(ra, str) or isinstance(dec, str)):
+    """Parse decimal or sexagesimal coordinates; reject rather than guess."""
+    if SkyCoord is None or u is None:
         try:
-            if isinstance(ra, str) and ("h" in ra or ":" in ra):
-                coord = SkyCoord(ra, dec, unit=(u.hourangle, u.deg))
-            else:
-                coord = SkyCoord(ra, dec, unit=(u.deg, u.deg))
-            return float(coord.ra.deg), float(coord.dec.deg)
-        except Exception:
-            pass
-
-    # Pure Python fallback for sexagesimal strings
-    import re
-
-    def parse_ra_str(s: str) -> float:
-        if isinstance(s, (int, float)):
-            return float(s)
-        s = str(s).strip()
-        # Sexagesimal hours: e.g. 22h39m52.08s or 22:39:52.08
-        match = re.match(r'^(\d+)[\:\s*h](\d+)[\:\s*m](\d+(?:\.\d+)?)', s)
-        if match:
-            h, m, sec = map(float, match.groups())
-            return (h + m / 60.0 + sec / 3600.0) * 15.0
-        return float(s)
-
-    def parse_dec_str(s: str) -> float:
-        if isinstance(s, (int, float)):
-            return float(s)
-        s = str(s).strip()
-        sign = -1.0 if s.startswith("-") else 1.0
-        s_clean = s.lstrip("+-")
-        # Sexagesimal degrees: e.g. 33d57m46.8s or 33:57:46.8
-        match = re.match(r'^(\d+)[\:\s*d°](\d+)[\:\s*m\'](\d+(?:\.\d+)?)', s_clean)
-        if match:
-            d, m, sec = map(float, match.groups())
-            return sign * (d + m / 60.0 + sec / 3600.0)
-        return float(s)
-
+            return float(ra), float(dec)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("sexagesimal coordinates require astropy") from exc
     try:
-        return parse_ra_str(ra), parse_dec_str(dec)
-    except (ValueError, TypeError):
-        raise ValueError(f"Invalid celestial coordinates: RA='{ra}', Dec='{dec}'")
+        if isinstance(ra, str) and (":" in ra or "h" in ra.lower()):
+            coord = SkyCoord(ra, dec, unit=(u.hourangle, u.deg))
+        else:
+            coord = SkyCoord(ra, dec, unit=(u.deg, u.deg))
+        return float(coord.ra.deg), float(coord.dec.deg)
+    except Exception as exc:
+        raise ValueError(f"invalid celestial coordinates: RA={ra!r}, Dec={dec!r}") from exc
 
 
 def search_mast_jwst(
-    target_name: str = "",
-    proposal_id: str | None = None,
-    ra: float | str | None = None,
-    dec: float | str | None = None,
-    radius_arcsec: float = 10.0,
-    limit: int = 10,
+    target_name: str = "", proposal_id: str | None = None, observation_id: str | None = None,
+    ra: float | str | None = None, dec: float | str | None = None, radius_arcsec: float = 10.0,
+    limit: int = 25,
 ) -> list[dict[str, Any]]:
-    """Search the MAST archive for JWST MIRI IFU data cubes by target, proposal, or RA/Dec coordinates.
+    """Find actual public MIRI MRS `*_s3d.fits` products and normalize them.
 
-    Parameters
-    ----------
-    target_name : str
-        Target object name (e.g., 'NGC 7319', 'Stephan\'s Quintet').
-    proposal_id : str, optional
-        JWST Program/Proposal ID (e.g., '1288').
-    ra : float or str, optional
-        Right Ascension (decimal degrees or sexagesimal string like '22h35m59.8s').
-    dec : float or str, optional
-        Declination (decimal degrees or sexagesimal string like '+33d57m46.8s').
-    radius_arcsec : float
-        Search radius in arcseconds for coordinate cone search.
-    limit : int
-        Maximum number of matching observations to return.
-
-    Returns
-    -------
-    list of dict
-        Structured observation records with keys:
-        'obs_id', 'target_name', 'proposal_id', 'instrument',
-        'submode', 'release_date', 'product_filename', 'download_url'
+    Astroquery is used first.  If it is unavailable or MAST rejects that query,
+    the documented MAST Mashup API is queried; failures raise ``MastQueryError``.
     """
-    target_name = target_name.strip()
-    has_coords = ra is not None and dec is not None
-
-    if not target_name and not proposal_id and not has_coords:
-        return []
-
-    # Strategy 1: astroquery if available
-    if HAS_ASTROQUERY:
+    if (ra is None) != (dec is None):
+        raise ValueError("RA and Dec must be supplied together")
+    ra_deg, dec_deg = parse_coordinates(ra, dec) if ra is not None else (None, None)
+    query = MastQuery(target_name=target_name.strip() or None, proposal_id=proposal_id or None,
+                      observation_id=observation_id or None, ra_deg=ra_deg, dec_deg=dec_deg,
+                      radius_arcsec=radius_arcsec, limit=limit)
+    errors: list[str] = []
+    if Observations is not None:
         try:
-            return _search_astroquery(target_name, proposal_id, ra, dec, radius_arcsec, limit)
-        except Exception:
-            pass
+            return [product.to_dict() for product in _search_astroquery(query)]
+        except Exception as exc:
+            errors.append(f"astroquery: {exc}")
+    try:
+        return [product.to_dict() for product in _search_rest_api(query)]
+    except Exception as exc:
+        errors.append(f"MAST API: {exc}")
+    raise MastQueryError("MAST search failed; " + " | ".join(errors))
 
-    # Strategy 2: Direct STScI MAST REST API fallback
-    return _search_rest_api(target_name, proposal_id, ra, dec, radius_arcsec, limit)
 
-
-def _search_astroquery(
-    target_name: str,
-    proposal_id: str | None,
-    ra: float | str | None,
-    dec: float | str | None,
-    radius_arcsec: float,
-    limit: int,
-) -> list[dict[str, Any]]:
-    """Search using astroquery.mast."""
-    has_coords = ra is not None and dec is not None
-
-    if has_coords:
-        ra_deg, dec_deg = parse_coordinates(ra, dec)
-        if HAS_ASTROPY_COORDS:
-            pos = SkyCoord(ra=ra_deg * u.deg, dec=dec_deg * u.deg)
-            obs_table = Observations.query_region(pos, radius=f"{radius_arcsec} arcsec")
-        else:
-            obs_table = Observations.query_region(f"{ra_deg} {dec_deg}", radius=f"{radius_arcsec} arcsec")
-        
-        # Filter for JWST MIRI
-        if len(obs_table) > 0 and "obs_collection" in obs_table.colnames:
-            mask = (obs_table["obs_collection"] == "JWST")
-            obs_table = obs_table[mask]
+def _search_astroquery(query: MastQuery) -> list[MastProduct]:
+    assert Observations is not None
+    if query.ra_deg is not None:
+        position: Any = f"{query.ra_deg} {query.dec_deg}" if SkyCoord is None else SkyCoord(query.ra_deg * u.deg, query.dec_deg * u.deg)
+        observations = Observations.query_region(position, radius=f"{query.radius_arcsec} arcsec")
     else:
-        kwargs: dict[str, Any] = {
-            "obs_collection": "JWST",
-            "instrument_name": "MIRI/IFU",
-            "dataproduct_type": "cube",
-        }
-        if target_name:
-            kwargs["target_name"] = target_name
-        if proposal_id:
-            kwargs["proposal_id"] = str(proposal_id)
-
-        obs_table = Observations.query_criteria(**kwargs)
-        if len(obs_table) == 0:
-            kwargs["instrument_name"] = "MIRI"
-            obs_table = Observations.query_criteria(**kwargs)
-
-    results: list[dict[str, Any]] = []
-    for row in obs_table[:limit]:
-        obs_id = str(row.get("obs_id", ""))
-        t_name = str(row.get("target_name", target_name or f"RA {ra}, Dec {dec}"))
-        pid = str(row.get("proposal_id", proposal_id or ""))
-        date = str(row.get("t_min", ""))
-
-        filename = f"{obs_id}_s3d.fits"
-        url = f"https://mast.stsci.edu/api/v0/download/file?uri=mast:JWST/product/{filename}"
-
-        results.append({
-            "obs_id": obs_id,
-            "target_name": t_name,
-            "proposal_id": pid,
-            "instrument": "MIRI/IFU",
-            "submode": "MRS",
-            "release_date": date[:10] if date else "Public",
-            "product_filename": filename,
-            "download_url": url,
-        })
-
-    return results if results else _build_mock_mast_records(target_name or f"RA={ra}, Dec={dec}", proposal_id)
+        criteria: dict[str, Any] = {"obs_collection": "JWST"}
+        if query.target_name: criteria["target_name"] = query.target_name
+        if query.proposal_id: criteria["proposal_id"] = query.proposal_id
+        if query.observation_id: criteria["obs_id"] = query.observation_id
+        observations = Observations.query_criteria(**criteria)
+    products: list[MastProduct] = []
+    for observation in list(observations)[:query.limit]:
+        obs = _row_dict(observation)
+        if str(obs.get("obs_collection", "JWST")).upper() != "JWST":
+            continue
+        for product_row in Observations.get_product_list(observation):
+            product = _normalize_product(obs, _row_dict(product_row))
+            if product is not None:
+                products.append(product)
+                if len(products) >= query.limit:
+                    return products
+    return products
 
 
-def _search_rest_api(
-    target_name: str,
-    proposal_id: str | None,
-    ra: float | str | None,
-    dec: float | str | None,
-    radius_arcsec: float,
-    limit: int,
-) -> list[dict[str, Any]]:
-    """Search using STScI MAST REST Mashup API."""
-    params: dict[str, Any] = {
-        "service": "Mast.Caom.Filtered.Jwst",
-        "format": "json",
-        "params": {
-            "columns": "*",
-            "filters": [
-                {"paramName": "obs_collection", "values": ["JWST"]},
-                {"paramName": "instrument_name", "values": ["MIRI/IFU", "MIRI"]},
-            ]
-        }
-    }
+def _search_rest_api(query: MastQuery) -> list[MastProduct]:
+    """Fallback using MAST's official `/api/v0/invoke` Mashup interface."""
+    filters = [{"paramName": "obs_collection", "values": ["JWST"]}]
+    for name, value in (("target_name", query.target_name), ("proposal_id", query.proposal_id), ("obs_id", query.observation_id)):
+        if value:
+            filters.append({"paramName": name, "values": [value]})
+    request: dict[str, Any] = {"service": "Mast.Caom.Filtered", "format": "json", "params": {"columns": "*", "filters": filters}}
+    if query.ra_deg is not None:
+        request["service"] = "Mast.Caom.Cone"
+        request["params"] = {"ra": query.ra_deg, "dec": query.dec_deg, "radius": query.radius_arcsec / 3600}
+    observations = _mast_invoke(request).get("data", [])[:query.limit]
+    products: list[MastProduct] = []
+    for obs in observations:
+        obs_dict = dict(obs)
+        obsid = obs_dict.get("obsid") or obs_dict.get("obs_id")
+        if obsid is None:
+            continue
+        product_response = _mast_invoke({"service": "Mast.Caom.Products", "format": "json", "params": {"obsid": str(obsid)}})
+        for row in product_response.get("data", []):
+            product = _normalize_product(obs_dict, dict(row))
+            if product is not None:
+                products.append(product)
+                if len(products) >= query.limit:
+                    return products
+    return products
 
-    if target_name:
-        params["params"]["filters"].append({
-            "paramName": "target_name", "values": [target_name]
-        })
-    if proposal_id:
-        params["params"]["filters"].append({
-            "paramName": "proposal_id", "values": [str(proposal_id)]
-        })
 
-    url = "https://mast.stsci.edu/api/v0/invoke"
-    data_str = urllib.parse.urlencode({"request": json.dumps(params)}).encode("utf-8")
+def _mast_invoke(payload: Mapping[str, Any]) -> dict[str, Any]:
+    encoded = urllib.parse.urlencode({"request": json.dumps(payload)}).encode("utf-8")
+    request = urllib.request.Request(MAST_INVOKE_URL, data=encoded, headers={"User-Agent": "jwst-ifu-pipeline/phase-2"})
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            body = json.loads(response.read().decode("utf-8"))
+    except Exception as exc:
+        raise MastQueryError(f"official MAST API request failed: {exc}") from exc
+    if not isinstance(body, dict) or not isinstance(body.get("data", []), list):
+        raise MastQueryError("official MAST API returned an unexpected response")
+    return body
 
-    req = urllib.request.Request(
-        url, data=data_str,
-        headers={"User-Agent": "JWST-IFU-Pipeline/1.0"}
+
+def _row_dict(row: Any) -> dict[str, Any]:
+    if isinstance(row, Mapping):
+        return dict(row)
+    colnames = getattr(row, "colnames", None) or getattr(getattr(row, "table", None), "colnames", [])
+    return {name: row[name] for name in colnames}
+
+
+def _text(value: Any) -> str | None:
+    if value is None or str(value).strip() in {"", "--", "None"}:
+        return None
+    return str(value).strip()
+
+
+def _normalize_product(observation: Mapping[str, Any], product: Mapping[str, Any]) -> MastProduct | None:
+    filename = _text(product.get("productFilename") or product.get("product_filename") or product.get("filename"))
+    uri = _text(product.get("dataURI") or product.get("data_uri") or product.get("uri"))
+    instrument = _text(observation.get("instrument_name") or observation.get("instrument"))
+    mode = _text(observation.get("instrument_configuration") or observation.get("submode") or observation.get("obs_mode"))
+    # MRS filenames are the stable product-level signal; metadata can be inconsistent.
+    if not filename or not uri or not filename.lower().endswith("_s3d.fits"):
+        return None
+    searchable = " ".join(value or "" for value in (instrument, mode, filename)).lower()
+    if "miri" not in searchable or not any(marker in searchable for marker in ("mrs", "ifu", "ch1", "ch2", "ch3", "ch4")):
+        return None
+    status = _text(product.get("releaseStatus") or product.get("release_status") or observation.get("dataRights")) or "UNKNOWN"
+    canonical_url = f"{MAST_DOWNLOAD_URL}?{urllib.parse.urlencode({'uri': uri})}"
+    return MastProduct(
+        observation_id=_text(observation.get("obs_id") or observation.get("obsid") or observation.get("observation_id")) or "UNKNOWN",
+        program_id=_text(observation.get("proposal_id") or observation.get("proposal") or observation.get("program")),
+        target_name=_text(observation.get("target_name")), instrument=instrument, mode=mode,
+        product_filename=filename, mast_uri=uri, download_url=canonical_url, release_status=status,
+        checksum=_text(product.get("md5") or product.get("checksum")),
+        metadata={"obsid": _text(observation.get("obsid")), "productType": _text(product.get("productType") or product.get("product_type")), "calib_level": _text(product.get("calib_level"))},
     )
 
+
+def validate_selected_product(product: Mapping[str, Any] | MastProduct) -> MastProduct:
+    """Validate untrusted product metadata before a download starts."""
+    value = product if isinstance(product, MastProduct) else MastProduct(
+        observation_id=str(product.get("observation_id") or product.get("obs_id") or ""), program_id=_text(product.get("program_id") or product.get("proposal_id")),
+        target_name=_text(product.get("target_name")), instrument=_text(product.get("instrument")), mode=_text(product.get("mode") or product.get("submode")),
+        product_filename=str(product.get("product_filename") or ""), mast_uri=str(product.get("mast_uri") or ""),
+        download_url=str(product.get("download_url") or ""), release_status=str(product.get("release_status") or "UNKNOWN"),
+        metadata=dict(product.get("metadata") or {}), checksum=_text(product.get("checksum")),
+    )
+    if not _SAFE_FILENAME.fullmatch(value.product_filename):
+        raise ProductSelectionError("unsupported product: expected a MIRI Level-3 '*_s3d.fits' filename")
+    if value.release_status.upper() in {"PROPRIETARY", "PRIVATE", "EXCLUSIVE"}:
+        raise ProductSelectionError("product is proprietary and cannot be downloaded anonymously")
+    if value.release_status.upper() not in {"PUBLIC", "RELEASED", "ARCHIVED"}:
+        raise ProductSelectionError(f"product is unavailable for verified public download (release status: {value.release_status})")
+    if not value.mast_uri.startswith("mast:") or not value.download_url.startswith("https://mast.stsci.edu/"):
+        raise ProductSelectionError("product lacks a canonical MAST URI or download URL")
+    searchable = " ".join(item or "" for item in (value.instrument, value.mode, value.product_filename)).lower()
+    if "miri" not in searchable or not any(mark in searchable for mark in ("mrs", "ifu", "ch1", "ch2", "ch3", "ch4")):
+        raise ProductSelectionError("product is not identified as a MIRI MRS/IFU cube")
+    return value
+
+
+def _validate_fits(path: Path) -> None:
+    if not path.is_file() or path.stat().st_size == 0:
+        raise MastDownloadError("download is empty")
+    if fits is None:
+        raise MastDownloadError("astropy is required to verify FITS downloads")
     try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            content = json.loads(resp.read().decode("utf-8"))
-            rows = content.get("data", [])
-    except Exception:
-        rows = []
-
-    # If query returned empty, construct placeholder sample record for known JWST targets
-    if not rows and target_name:
-        return _build_mock_mast_records(target_name, proposal_id)
-
-    results: list[dict[str, Any]] = []
-    for row in rows[:limit]:
-        obs_id = str(row.get("obs_id") or row.get("observation_id") or "jw01288-o001_t001_miri")
-        target = str(row.get("target_name") or target_name)
-        pid = str(row.get("proposal_id") or proposal_id or "1288")
-        filename = f"{obs_id}_ch1-short_s3d.fits"
-        download_url = f"https://mast.stsci.edu/api/v0/download/file?uri=mast:JWST/product/{filename}"
-
-        results.append({
-            "obs_id": obs_id,
-            "target_name": target,
-            "proposal_id": pid,
-            "instrument": "MIRI/IFU",
-            "submode": "MRS (Channel 1-4)",
-            "release_date": "2022-07-12",
-            "product_filename": filename,
-            "download_url": download_url,
-        })
-
-    return results if results else _build_mock_mast_records(target_name, proposal_id)
+        with fits.open(path, memmap=False):
+            pass
+    except Exception as exc:
+        raise MastDownloadError(f"download is not readable FITS: {exc}") from exc
 
 
-def _build_mock_mast_records(
-    target_name: str,
-    proposal_id: str | None,
-) -> list[dict[str, Any]]:
-    """Build representative MAST records for testing and demonstration."""
-    clean_target = target_name or "NGC 7319"
-    pid = proposal_id or "1288"
-
-    return [
-        {
-            "obs_id": f"jw{pid}-o001_t001_miri_ch1-short",
-            "target_name": clean_target,
-            "proposal_id": pid,
-            "instrument": "MIRI/IFU",
-            "submode": "MRS Channel 1 (4.9-7.6 µm)",
-            "release_date": "2022-07-12",
-            "product_filename": f"jw{pid}-o001_t001_miri_ch1-short_s3d.fits",
-            "download_url": f"https://mast.stsci.edu/api/v0/download/file?uri=mast:JWST/product/jw{pid}-o001_t001_miri_ch1-short_s3d.fits",
-        },
-        {
-            "obs_id": f"jw{pid}-o001_t001_miri_ch2-medium",
-            "target_name": clean_target,
-            "proposal_id": pid,
-            "instrument": "MIRI/IFU",
-            "submode": "MRS Channel 2 (7.5-11.7 µm)",
-            "release_date": "2022-07-12",
-            "product_filename": f"jw{pid}-o001_t001_miri_ch2-medium_s3d.fits",
-            "download_url": f"https://mast.stsci.edu/api/v0/download/file?uri=mast:JWST/product/jw{pid}-o001_t001_miri_ch2-medium_s3d.fits",
-        },
-    ]
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
-def download_mast_product(
-    download_url: str,
-    output_filename: str,
-    output_dir: str | Path = "data/raw",
-) -> Path:
-    """Download a FITS product from MAST into local storage.
-
-    Parameters
-    ----------
-    download_url : str
-        URL of the MAST product.
-    output_filename : str
-        Filename to save locally.
-    output_dir : str or Path
-        Directory where file will be cached.
-
-    Returns
-    -------
-    Path
-        Local path to the downloaded file.
-    """
-    out_dir = Path(output_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    dest_path = out_dir / output_filename
-
-    # If file already exists and is non-empty, use cached version
-    if dest_path.exists() and dest_path.stat().st_size > 1000:
-        return dest_path
-
-    # Try downloading file from MAST
-    try:
-        req = urllib.request.Request(
-            download_url,
-            headers={"User-Agent": "JWST-IFU-Pipeline/1.0"}
-        )
-        with urllib.request.urlopen(req, timeout=30) as resp, open(dest_path, "wb") as f:
-            f.write(resp.read())
-    except Exception:
-        # If remote MAST server url is unreachable (e.g. offline testing), generate synthetic FITS cube
-        from tests.synthetic import generate_synthetic_cube
-        from astropy.io import fits
-        cube = generate_synthetic_cube()
-        
-        hdu_sci = fits.ImageHDU(data=cube.data, name="SCI")
-        hdu_sci.header["CRVAL3"] = cube.wavelength_range[0]
-        hdu_sci.header["CDELT3"] = (cube.wavelength_range[1] - cube.wavelength_range[0]) / cube.n_wavelengths
-        hdu_sci.header["CUNIT3"] = "um"
-        hdu_sci.header["TARGNAME"] = output_filename.split("_")[0]
-        
-    return dest_path
+def download_mast_product(product: Mapping[str, Any] | MastProduct, output_dir: str | Path = "data/raw", *, query: MastQuery | None = None, retries: int = 2) -> Path:
+    """Download one selected MAST product transactionally, with a provenance sidecar."""
+    selected = validate_selected_product(product)
+    if retries < 0:
+        raise ValueError("retries must be non-negative")
+    cache = Path(output_dir).resolve()
+    cache.mkdir(parents=True, exist_ok=True)
+    destination = cache / selected.product_filename
+    if destination.exists():
+        try:
+            _validate_fits(destination)
+            _write_provenance(destination, selected, query, reused_cache=True)
+            return destination
+        except MastDownloadError:
+            # Do not overwrite a suspect cache; leave it for inspection.
+            raise MastDownloadError(f"cached file failed FITS verification: {destination}")
+    last_error: Exception | None = None
+    for attempt in range(retries + 1):
+        temporary: Path | None = None
+        try:
+            fd, temp_name = tempfile.mkstemp(prefix=f".{selected.product_filename}.", suffix=".part", dir=cache)
+            temporary = Path(temp_name)
+            with os.fdopen(fd, "wb") as handle:
+                request = urllib.request.Request(selected.download_url, headers={"User-Agent": "jwst-ifu-pipeline/phase-2"})
+                with urllib.request.urlopen(request, timeout=120) as response:
+                    if getattr(response, "status", 200) >= 400:
+                        raise MastDownloadError(f"MAST returned HTTP {response.status}")
+                    while chunk := response.read(1024 * 1024):
+                        handle.write(chunk)
+            _validate_fits(temporary)
+            os.replace(temporary, destination)
+            _write_provenance(destination, selected, query, reused_cache=False)
+            return destination
+        except Exception as exc:
+            last_error = exc
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
+            if attempt < retries:
+                time.sleep(min(2 ** attempt, 4))
+    raise MastDownloadError(f"download failed after {retries + 1} attempt(s): {last_error}") from last_error
 
 
-def download_mast_mosaic_set(
-    target_name: str = "Crab Nebula",
-    output_dir: str | Path = "data/mosaics",
-) -> list[Path]:
-    """Download a multi-tile FITS mosaic dataset covering a target object footprint.
-
-    Parameters
-    ----------
-    target_name : str
-        Target object name (e.g. 'Crab Nebula', 'Stephan\'s Quintet').
-    output_dir : str or Path
-        Output directory for mosaic tiles.
-
-    Returns
-    -------
-    list of Path
-        Paths to downloaded FITS mosaic tile files.
-    """
-    out_dir = Path(output_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    clean_target = target_name.lower().replace(" ", "_")
-    quadrants = ["nw", "ne", "sw", "se"]
-    tile_paths: list[Path] = []
-
-    from astropy.io import fits
-    from tests.synthetic import generate_synthetic_cube
-
-    for quad in quadrants:
-        filename = f"{clean_target}_tile_{quad}_s3d.fits"
-        dest_path = out_dir / filename
-
-        if not dest_path.exists() or dest_path.stat().st_size < 1000:
-            cube = generate_synthetic_cube()
-            hdu_sci = fits.ImageHDU(data=cube.data, name="SCI")
-            
-            off_ra = (-0.005 if "w" in quad else 0.005)
-            off_dec = (0.005 if "n" in quad else -0.005)
-            
-            hdu_sci.header["CRVAL1"] = 83.6331 + off_ra
-            hdu_sci.header["CRVAL2"] = 22.0145 + off_dec
-            hdu_sci.header["CRPIX1"] = 15.0
-            hdu_sci.header["CRPIX2"] = 15.0
-            hdu_sci.header["CDELT1"] = -0.0001
-            hdu_sci.header["CDELT2"] = 0.0001
-            hdu_sci.header["CTYPE1"] = "RA---TAN"
-            hdu_sci.header["CTYPE2"] = "DEC--TAN"
-            hdu_sci.header["CRVAL3"] = cube.wavelength_range[0]
-            hdu_sci.header["CDELT3"] = (cube.wavelength_range[1] - cube.wavelength_range[0]) / cube.n_wavelengths
-            hdu_sci.header["CUNIT3"] = "um"
-            hdu_sci.header["TARGNAME"] = target_name
-
-            hdul = fits.HDUList([fits.PrimaryHDU(), hdu_sci])
-            hdul.writeto(dest_path, overwrite=True)
-
-        tile_paths.append(dest_path)
-
-    return tile_paths
+def _write_provenance(path: Path, product: MastProduct, query: MastQuery | None, *, reused_cache: bool) -> Path:
+    record = {"schema_version": 1, "retrieved_at": datetime.now(timezone.utc).isoformat(), "reused_cache": reused_cache,
+              "local_path": str(path), "byte_size": path.stat().st_size, "sha256": _sha256(path),
+              "mast_product": product.to_dict(), "query": asdict(query) if query else None,
+              "packages": {"astroquery": getattr(astroquery, "__version__", None), "astropy": getattr(astropy, "__version__", None)}}
+    sidecar = path.with_name(path.name + ".provenance.json")
+    sidecar.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return sidecar

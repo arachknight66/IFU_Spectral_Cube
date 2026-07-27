@@ -273,12 +273,16 @@ with st.sidebar:
         st.markdown("#### MAST JWST Archive Search")
         search_mode = st.radio("Search Mode", ["🎯 Target / Proposal", "🌐 RA / Dec Coordinates"], label_visibility="collapsed")
         
-        from src.core.mast import search_mast_jwst, download_mast_product
+        from src.core.mast import MastDownloadError, MastQuery, MastQueryError, ProductSelectionError, parse_coordinates, search_mast_jwst, download_mast_product
 
         if search_mode == "🎯 Target / Proposal":
             target_input = st.text_input("Target Name", value="NGC 7319", help="e.g. NGC 7319, Stephan's Quintet, NGC 6543")
             proposal_input = st.text_input("Proposal ID (Optional)", value="", help="e.g. 1288")
-            mast_results = search_mast_jwst(target_name=target_input, proposal_id=proposal_input or None, limit=5)
+            try:
+                mast_results = search_mast_jwst(target_name=target_input, proposal_id=proposal_input or None, limit=5)
+            except MastQueryError as exc:
+                st.error(f"MAST search failed: {exc}")
+                mast_results = []
         else:
             if st.button("🦀 Quick Load Crab Nebula (M1)", use_container_width=True):
                 st.session_state["ra_val"] = "83.6331"
@@ -293,8 +297,8 @@ with st.sidebar:
             
             try:
                 mast_results = search_mast_jwst(ra=ra_input, dec=dec_input, radius_arcsec=radius_input, limit=5)
-            except Exception as e_coord:
-                st.error(f"Invalid coordinates: {str(e_coord)}")
+            except (ValueError, MastQueryError) as e_coord:
+                st.error(f"MAST search failed: {str(e_coord)}")
                 mast_results = []
 
         if mast_results:
@@ -303,10 +307,21 @@ with st.sidebar:
                 mast_results,
                 format_func=lambda r: f"{r['target_name']} | {r['submode']} ({r['product_filename']})",
             )
-            if st.button("📥 Download & Analyze Cube", use_container_width=True):
-                with st.spinner(f"Downloading {selected_rec['product_filename']} from MAST..."):
-                    mast_fits_path = download_mast_product(selected_rec['download_url'], selected_rec['product_filename'])
-                st.success(f"Downloaded to {mast_fits_path.name}")
+            if st.button("📥 Download verified FITS", use_container_width=True):
+                try:
+                    with st.spinner(f"Downloading {selected_rec['product_filename']} from MAST..."):
+                        if search_mode == "🎯 Target / Proposal":
+                            query = MastQuery(target_name=target_input or None, proposal_id=proposal_input or None, limit=5)
+                        else:
+                            ra_deg, dec_deg = parse_coordinates(ra_input, dec_input)
+                            query = MastQuery(ra_deg=ra_deg, dec_deg=dec_deg, radius_arcsec=radius_input, limit=5)
+                        mast_fits_path = download_mast_product(selected_rec, "data/raw", query=query)
+                    from src.core.loader import CubeLoadError, load_fits_cube
+                    validated_cube = load_fits_cube(mast_fits_path)
+                    st.success(f"Downloaded verified FITS to {mast_fits_path.name}; provenance sidecar recorded.")
+                    st.json(validated_cube.validation_report.to_dict(), expanded=False)
+                except (MastDownloadError, ProductSelectionError, CubeLoadError, ValueError) as exc:
+                    st.error(f"MAST download or FITS validation failed: {exc}")
         else:
             st.warning("No MIRI IFU observations found for search terms.")
 

@@ -1,312 +1,155 @@
-"""
-FITS Cube Loader for JWST MIRI IFU Data.
-
-Handles the complexities of reading JWST pipeline-produced FITS files:
-    - Multi-extension FITS (science data in 'SCI' extension or HDU 1)
-    - WCS-based wavelength axis construction
-    - Graceful fallback when WCS metadata is incomplete
-    - Metadata extraction from headers
-
-The JWST MIRI MRS pipeline produces Level-3 (s3d) cubes with:
-    - Axis 1 (NAXIS1): Right Ascension
-    - Axis 2 (NAXIS2): Declination
-    - Axis 3 (NAXIS3): Wavelength
-    yielding a data array of shape (n_wavelength, n_y, n_x).
-"""
+"""Strict FITS ingestion for JWST-style MIRI Level-3 spectral cubes."""
 
 from __future__ import annotations
 
-import warnings
+import json
 from pathlib import Path
 from typing import Any
 
 import numpy as np
+from astropy import units as u
 from astropy.io import fits
-try:
-    from astropy.wcs import WCS
-except ImportError:
-    WCS = None
+from astropy.wcs import WCS
 
-from .cube import SpectralCube
+from .cube import CubeValidationReport, SpectralCube
 
 
-def load_fits_cube(filepath: str | Path) -> SpectralCube:
-    """Load a FITS spectral cube and construct a SpectralCube object.
+class CubeLoadError(ValueError):
+    """Raised when a FITS product cannot be scientifically loaded safely."""
 
-    Parameters
-    ----------
-    filepath : str or Path
-        Path to the FITS file containing the IFU data cube.
 
-    Returns
-    -------
-    SpectralCube
-        Fully initialized spectral cube with data, wavelength axis,
-        and metadata.
+def load_fits_cube(filepath: str | Path, *, allow_placeholder_wavelength: bool = False) -> SpectralCube:
+    """Load a `.fits`/`.fits.gz` cube without modifying source science values.
 
-    Raises
-    ------
-    FileNotFoundError
-        If the FITS file does not exist.
-    ValueError
-        If no 3D data array can be found in the FITS file.
-
-    Notes
-    -----
-    The loader attempts the following strategy for finding the data:
-        1. Look for a 'SCI' extension (JWST standard).
-        2. Fall back to the first extension with 3D data.
-        3. Fall back to the primary HDU if it contains 3D data.
+    A spectral WCS is mandatory by default. ``allow_placeholder_wavelength`` is
+    intentionally opt-in and is only for explicitly non-scientific inspection.
     """
-    filepath = Path(filepath)
-    if not filepath.exists():
-        raise FileNotFoundError(f"FITS file not found: {filepath}")
-
-    with fits.open(filepath) as hdul:
-        data, header = _extract_cube_data(hdul)
-        err = _extract_err_data(hdul, data.shape)
-        dq = _extract_dq_data(hdul, data.shape)
-        wavelength = _build_wavelength_axis(header, data.shape[0])
-        metadata = _extract_metadata(header)
-
-    # Clean NaNs in data and err arrays safely
-    data = np.nan_to_num(data, nan=0.0, posinf=0.0, neginf=0.0)
-    if err is not None:
-        err = np.nan_to_num(err, nan=1e6, posinf=1e6, neginf=1e6)
-        # Avoid non-positive variances
-        err = np.clip(err, 1e-12, None)
-
-    return SpectralCube(
-        data=data,
-        wavelength=wavelength,
-        header=metadata,
-        filepath=str(filepath),
-        err=err,
-        dq=dq,
-    )
-
-
-def _extract_cube_data(
-    hdul: fits.HDUList,
-) -> tuple[np.ndarray, fits.Header]:
-    """Locate and extract 3D data from a FITS HDU list.
-
-    Strategy:
-        1. 'SCI' named extension (JWST pipeline convention)
-        2. First extension with NAXIS=3
-        3. Primary HDU if 3D
-
-    Returns
-    -------
-    tuple of (data, header)
-    """
-    # Strategy 1: named SCI extension
-    if "SCI" in hdul:
-        ext = hdul["SCI"]
-        if ext.data is not None:
-            data = np.squeeze(ext.data)
-            if data.ndim == 3:
-                return data.astype(np.float64), ext.header
-
-    # Strategy 2: first 3D extension
-    for ext in hdul:
-        if ext.data is not None:
-            data = np.squeeze(ext.data)
-            if data.ndim == 3:
-                return data.astype(np.float64), ext.header
-
-    # Strategy 3: primary HDU
-    if hdul[0].data is not None:
-        data = np.squeeze(hdul[0].data)
-        if data.ndim == 3:
-            return data.astype(np.float64), hdul[0].header
-
-    shapes = []
-    for ext in hdul:
-        if ext.data is not None:
-            shapes.append(f"'{ext.name}': {ext.data.shape}")
-        else:
-            shapes.append(f"'{ext.name}': Empty")
-
-    raise ValueError(
-        "No 3D data cube found in FITS file. "
-        "Expected a data array with NAXIS=3. "
-        f"Found HDU shapes: {', '.join(shapes)}"
-    )
+    source = Path(filepath).resolve()
+    if source.suffix.lower() not in {".fits", ".gz"} or not source.is_file():
+        raise FileNotFoundError(f"expected existing .fits or .fits.gz file, got {source}")
+    warnings: list[str] = []
+    with fits.open(source, memmap=False) as hdul:
+        science = _required_extension(hdul, "SCI")
+        raw_flux = np.asarray(science.data)
+        if raw_flux.ndim != 3:
+            raise CubeLoadError(f"SCI must be 3D; found shape {raw_flux.shape}")
+        try:
+            science_wcs = WCS(science.header, relax=False)
+            flux, wavelength, spectral_numpy_axis, reversed_axis = _orient_with_spectral_wcs(raw_flux, science_wcs)
+            wcs_status = "valid spectral WCS"
+        except Exception as exc:
+            if not allow_placeholder_wavelength:
+                raise CubeLoadError(f"SCI spectral WCS is missing, ambiguous, or invalid: {exc}") from exc
+            flux = np.array(raw_flux, copy=True)
+            spectral_numpy_axis, reversed_axis = 0, False
+            wavelength = np.arange(1, flux.shape[0] + 1, dtype=float)
+            science_wcs = None
+            wcs_status = "placeholder wavelength (explicit opt-in)"
+            warnings.append("placeholder channel wavelengths used; cube is not suitable for science analysis")
+        arrays, found = _coupled_extensions(hdul, raw_flux.shape, spectral_numpy_axis, reversed_axis)
+        err = arrays.pop("ERR", None)
+        dq = arrays.pop("DQ", None)
+        variances = arrays
+        provenance_path, provenance = _load_provenance(source, warnings)
+        identifiers = _source_identifiers(science.header, hdul[0].header, provenance)
+        validity = np.isfinite(flux)
+        dq_count = int(np.count_nonzero(dq)) if dq is not None else 0
+        sampling = float(np.median(np.diff(wavelength))) if wavelength.size > 1 else None
+        report = CubeValidationReport(
+            shape=tuple(int(i) for i in flux.shape), orientation="(wavelength, y, x)" + ("; reversed from descending WCS" if reversed_axis else ""),
+            wavelength_range_um=(float(wavelength[0]), float(wavelength[-1])), wavelength_sampling_um=sampling,
+            flux_unit=str(science.header.get("BUNIT")) if science.header.get("BUNIT") else None,
+            extensions_found=tuple(found), wcs_status=wcs_status, valid_pixel_count=int(validity.sum()),
+            invalid_pixel_count=int((~validity).sum()), dq_flagged_pixel_count=dq_count,
+            warnings=tuple(warnings), source_path=str(source), provenance_path=str(provenance_path) if provenance_path else None,
+            source_identifiers=identifiers,
+        )
+        return SpectralCube(flux, wavelength, science_header=science.header, primary_header=hdul[0].header,
+                            wcs=science_wcs, flux_unit=report.flux_unit, filepath=source, err=err, dq=dq,
+                            variances=variances, provenance_path=provenance_path, provenance=provenance,
+                            validation_report=report)
 
 
-def _extract_err_data(
-    hdul: fits.HDUList,
-    target_shape: tuple[int, int, int],
-) -> np.ndarray | None:
-    """Extract standard error/uncertainty array from FITS extensions."""
-    for name in ["ERR", "ERROR", "VAR_POISSON", "VAR_RNOISE", "ERRARR"]:
-        if name in hdul and hdul[name].data is not None:
-            err = np.squeeze(hdul[name].data).astype(np.float64)
-            if err.shape == target_shape:
-                if name.startswith("VAR_"):
-                    err = np.sqrt(np.maximum(0.0, err))
-                return err
-
-    # Check unnamed extensions
-    for ext in hdul:
-        if ext.name not in ["PRIMARY", "SCI"] and ext.data is not None:
-            arr = np.squeeze(ext.data).astype(np.float64)
-            if arr.shape == target_shape and "ERR" in ext.name.upper():
-                return arr
-
-    return None
+def _required_extension(hdul: fits.HDUList, name: str) -> fits.ImageHDU:
+    if name not in hdul or hdul[name].data is None:
+        available = ", ".join(f"{hdu.name}:{None if hdu.data is None else hdu.data.shape}" for hdu in hdul)
+        raise CubeLoadError(f"required {name} extension is absent or empty; available HDUs: {available}")
+    return hdul[name]
 
 
-def _extract_dq_data(
-    hdul: fits.HDUList,
-    target_shape: tuple[int, int, int],
-) -> np.ndarray | None:
-    """Extract Data Quality bitmask array from FITS extensions."""
-    for name in ["DQ", "DQARR", "QUALITY"]:
-        if name in hdul and hdul[name].data is not None:
-            dq = np.squeeze(hdul[name].data).astype(np.int32)
-            if dq.shape == target_shape:
-                return dq
-    return None
+def _orient_with_spectral_wcs(data: np.ndarray, wcs: WCS) -> tuple[np.ndarray, np.ndarray, int, bool]:
+    if wcs.pixel_n_dim != 3 or wcs.world_n_dim < 3:
+        raise CubeLoadError(f"expected 3D WCS, found pixel_n_dim={wcs.pixel_n_dim}, world_n_dim={wcs.world_n_dim}")
+    physical = list(wcs.world_axis_physical_types)
+    spectral_world = [i for i, value in enumerate(physical) if value and ("em." in value or "spect" in value)]
+    if len(spectral_world) != 1:
+        raise CubeLoadError(f"expected exactly one spectral world axis; found {physical}")
+    world_axis = spectral_world[0]
+    correlated = np.flatnonzero(wcs.axis_correlation_matrix[world_axis])
+    if len(correlated) != 1:
+        raise CubeLoadError("spectral WCS axis is coupled ambiguously to pixel axes")
+    pixel_axis = int(correlated[0])
+    spectral_numpy_axis = data.ndim - 1 - pixel_axis
+    values = _wavelength_from_wcs(wcs, world_axis, pixel_axis, data.shape[spectral_numpy_axis])
+    oriented = np.moveaxis(np.array(data, copy=True), spectral_numpy_axis, 0)
+    coupled_reversed = bool(np.all(np.diff(values) < 0))
+    if coupled_reversed:
+        values = values[::-1].copy()
+        oriented = oriented[::-1].copy()
+    if not (np.all(np.isfinite(values)) and np.all(values > 0) and np.all(np.diff(values) > 0)):
+        raise CubeLoadError("spectral WCS wavelengths must be finite, positive, and strictly monotonic")
+    return oriented, values, spectral_numpy_axis, coupled_reversed
 
 
-def _build_wavelength_axis(
-    header: fits.Header,
-    n_channels: int,
-) -> np.ndarray:
-    """Construct the wavelength axis from FITS header WCS information.
-
-    Attempts WCS-based construction using CRPIX3, CRVAL3, CDELT3.
-    Falls back to a linear index array if WCS keywords are missing.
-
-    Parameters
-    ----------
-    header : fits.Header
-        FITS header containing WCS keywords.
-    n_channels : int
-        Number of spectral channels (NAXIS3).
-
-    Returns
-    -------
-    np.ndarray
-        1D wavelength array in microns.
-    """
-    # Try full WCS approach first
+def _wavelength_from_wcs(wcs: WCS, world_axis: int, pixel_axis: int, length: int) -> np.ndarray:
+    pixels = [np.full(length, crpix - 1.0) for crpix in wcs.wcs.crpix]
+    pixels[pixel_axis] = np.arange(length, dtype=float)
+    world = wcs.all_pix2world(*pixels, 0)
+    unit_text = wcs.world_axis_units[world_axis]
+    if not unit_text:
+        raise CubeLoadError("spectral WCS has no declared unit")
     try:
-        wcs = WCS(header)
-        if wcs.naxis >= 3:
-            # Build pixel coordinate array for spectral axis
-            pixel_coords = np.zeros((n_channels, wcs.naxis))
-            pixel_coords[:, 2] = np.arange(n_channels)  # spectral axis
-            world_coords = wcs.pixel_to_world_values(pixel_coords)
-            # world_coords is an array of shape (n_channels, naxis)
-            # Spectral axis is the 3rd (index 2)
-            if isinstance(world_coords, np.ndarray):
-                wavelength = world_coords[:, 2]
-            else:
-                wavelength = np.array([w[2] for w in world_coords])
+        return (np.asarray(world[world_axis], dtype=float) * u.Unit(unit_text)).to_value(u.um)
+    except Exception as exc:
+        raise CubeLoadError(f"spectral WCS unit {unit_text!r} cannot convert to microns") from exc
 
-            # Convert to microns if necessary (JWST uses meters in WCS)
-            wavelength = _ensure_microns(wavelength, header)
 
-            if np.all(np.isfinite(wavelength)) and np.all(wavelength > 0):
-                return wavelength
-    except Exception:
-        pass
+def _coupled_extensions(hdul: fits.HDUList, source_shape: tuple[int, ...], spectral_numpy_axis: int, reversed_axis: bool) -> tuple[dict[str, np.ndarray], list[str]]:
+    arrays: dict[str, np.ndarray] = {}
+    found = ["SCI"]
+    for name in ("ERR", "VAR_POISSON", "VAR_RNOISE", "DQ"):
+        if name not in hdul or hdul[name].data is None:
+            continue
+        raw = np.asarray(hdul[name].data)
+        if raw.shape != source_shape:
+            raise CubeLoadError(f"{name} shape {raw.shape} does not match SCI source shape {source_shape}")
+        value = np.moveaxis(np.array(raw, copy=True), spectral_numpy_axis, 0)
+        if reversed_axis:
+            value = value[::-1].copy()
+        arrays[name] = value
+        found.append(name)
+    return arrays, found
 
-    # Fallback: manual CRPIX3/CRVAL3/CDELT3
+
+def _load_provenance(source: Path, warnings: list[str]) -> tuple[Path | None, dict[str, Any]]:
+    candidate = source.with_name(source.name + ".provenance.json")
+    if not candidate.exists():
+        return None, {}
     try:
-        crpix3 = header.get("CRPIX3", 1.0)
-        crval3 = header.get("CRVAL3")
-        cdelt3 = header.get("CDELT3") or header.get("CD3_3")
-
-        if crval3 is not None and cdelt3 is not None:
-            pixel_indices = np.arange(n_channels)
-            wavelength = crval3 + (pixel_indices - (crpix3 - 1)) * cdelt3
-            wavelength = _ensure_microns(wavelength, header)
-
-            if np.all(np.isfinite(wavelength)) and np.all(wavelength > 0):
-                return wavelength
-    except Exception:
-        pass
-
-    # Last resort: channel indices
-    warnings.warn(
-        "Could not construct wavelength axis from WCS. "
-        "Using channel indices as placeholder. "
-        "Spectral analysis results will be in channel units.",
-        stacklevel=2,
-    )
-    return np.arange(n_channels, dtype=np.float64)
+        parsed = json.loads(candidate.read_text(encoding="utf-8"))
+        if not isinstance(parsed, dict): raise ValueError("not a JSON object")
+        return candidate, parsed
+    except Exception as exc:
+        warnings.append(f"provenance sidecar unreadable: {exc}")
+        return candidate, {}
 
 
-def _ensure_microns(
-    wavelength: np.ndarray,
-    header: fits.Header,
-) -> np.ndarray:
-    """Convert wavelength array to microns if needed.
-
-    JWST WCS stores wavelengths in meters. Detects this by checking
-    if values are << 1 (i.e., in meters) and converts to µm.
-
-    Parameters
-    ----------
-    wavelength : np.ndarray
-        Wavelength array in unknown units.
-    header : fits.Header
-        Header for unit information.
-
-    Returns
-    -------
-    np.ndarray
-        Wavelength in microns.
-    """
-    # Check CUNIT3 first
-    cunit3 = header.get("CUNIT3", "").strip().lower()
-    if cunit3 in ("m", "meter", "meters"):
-        return wavelength * 1e6
-    elif cunit3 in ("um", "micron", "microns"):
-        return wavelength
-    elif cunit3 in ("nm", "nanometer", "nanometers"):
-        return wavelength * 1e-3
-    elif cunit3 in ("angstrom", "a", "ang"):
-        return wavelength * 1e-4
-
-    # Heuristic: if median wavelength < 1e-3, assume meters
-    median_wl = np.nanmedian(wavelength)
-    if median_wl < 1e-3:
-        return wavelength * 1e6
-    elif median_wl > 1000:
-        # Likely Angstroms
-        return wavelength * 1e-4
-
-    return wavelength
-
-
-def _extract_metadata(header: fits.Header) -> dict[str, Any]:
-    """Extract scientifically relevant metadata from the FITS header.
-
-    Returns
-    -------
-    dict
-        Dictionary of key metadata fields.
-    """
-    keys_of_interest = [
-        "TELESCOP", "INSTRUME", "DETECTOR", "FILTER", "CHANNEL",
-        "BAND", "SUBARRAY", "GRATNG14",
-        "TARGNAME", "TARG_RA", "TARG_DEC",
-        "DATE-OBS", "TIME-OBS", "EXPTIME", "EFFINTTM",
-        "NAXIS1", "NAXIS2", "NAXIS3",
-        "CRPIX3", "CRVAL3", "CDELT3", "CUNIT3",
-        "PROGRAM", "TITLE", "PI_NAME",
-        "BUNIT",
-    ]
-
-    metadata: dict[str, Any] = {}
-    for key in keys_of_interest:
-        val = header.get(key)
-        if val is not None:
-            metadata[key] = val
-
-    return metadata
+def _source_identifiers(science: fits.Header, primary: fits.Header, provenance: dict[str, Any]) -> dict[str, str]:
+    result: dict[str, str] = {}
+    for key in ("OBS_ID", "PROGRAM", "PROGRAMID", "TARGNAME", "FILENAME"):
+        value = science.get(key, primary.get(key))
+        if value is not None: result[key] = str(value)
+    mast = provenance.get("mast_product", {}) if isinstance(provenance, dict) else {}
+    for key in ("mast_uri", "observation_id", "product_filename"):
+        if mast.get(key) is not None: result[key] = str(mast[key])
+    return result

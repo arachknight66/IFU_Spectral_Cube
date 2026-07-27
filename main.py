@@ -56,6 +56,10 @@ Examples:
         "--mast-proposal", type=str, default="",
         help="Search and download JWST dataset from MAST by Proposal/Program ID (e.g., '1288')",
     )
+    parser.add_argument("--mast-observation", type=str, default="", help="Search MAST by exact observation ID")
+    parser.add_argument("--mast-limit", type=int, default=25, help="Maximum normalized MAST products to list")
+    parser.add_argument("--mast-select", type=int, default=None, help="Zero-based matching product index to download")
+    parser.add_argument("--mast-cache", type=str, default="data/raw", help="Verified MAST download cache directory")
     parser.add_argument(
         "--ra", type=str, default="",
         help="Search MAST by Right Ascension (decimal degrees or sexagesimal e.g. '339.967' or '22h39m52s')",
@@ -126,28 +130,58 @@ def main(argv: list[str] | None = None) -> int:
         from tests.synthetic import generate_synthetic_cube
         cube = generate_synthetic_cube()
         print(f"\n  Cube: {cube}")
-    elif args.mast_target or args.mast_proposal or (args.ra and args.dec):
+    elif args.mast_target or args.mast_proposal or args.mast_observation or (args.ra and args.dec):
         print("=" * 60)
         print("  JWST MIRI IFU Spectral Pipeline — MAST Archive Mode")
         print("=" * 60)
-        from src.core.mast import search_mast_jwst, download_mast_product
-        if args.ra and args.dec:
-            print(f"\n  Searching MAST for RA={args.ra}, Dec={args.dec} (Radius={args.radius_arcsec}\")...")
-            records = search_mast_jwst(ra=args.ra, dec=args.dec, radius_arcsec=args.radius_arcsec, limit=1)
-        else:
-            print(f"\n  Searching MAST for Target='{args.mast_target}', Proposal='{args.mast_proposal}'...")
-            records = search_mast_jwst(target_name=args.mast_target, proposal_id=args.mast_proposal or None, limit=1)
+        from src.core.mast import MastDownloadError, MastQuery, MastQueryError, ProductSelectionError, download_mast_product, parse_coordinates, search_mast_jwst
+        try:
+            if args.ra and args.dec:
+                print(f"\n  Searching MAST for RA={args.ra}, Dec={args.dec} (Radius={args.radius_arcsec}\")...")
+                records = search_mast_jwst(ra=args.ra, dec=args.dec, radius_arcsec=args.radius_arcsec, limit=args.mast_limit)
+            else:
+                print(f"\n  Searching MAST for Target='{args.mast_target}', Proposal='{args.mast_proposal}'...")
+                records = search_mast_jwst(target_name=args.mast_target, proposal_id=args.mast_proposal or None, observation_id=args.mast_observation or None, limit=args.mast_limit)
+        except (MastQueryError, ValueError) as exc:
+            print(f"MAST search error: {exc}", file=sys.stderr)
+            return 1
 
         if not records:
             print("Error: No MAST observations found matching search parameters.", file=sys.stderr)
             return 1
-        rec = records[0]
-        print(f"  Found: {rec['obs_id']} ({rec['submode']})")
-        print(f"  Downloading product: {rec['product_filename']}...")
-        local_path = download_mast_product(rec['download_url'], rec['product_filename'])
-        print(f"  Loading: {local_path}")
-        cube = pipeline.load(str(local_path))
-        print(f"  Cube: {cube}")
+        for index, rec in enumerate(records):
+            print(f"  [{index}] {rec['obs_id']} | {rec['submode']} | {rec['product_filename']} | {rec['release_status']}")
+        if args.mast_select is None:
+            print("Select a product with --mast-select INDEX to download; archive mode does not process cubes yet.")
+            return 0
+        if not 0 <= args.mast_select < len(records):
+            print("Error: --mast-select is outside the listed product range.", file=sys.stderr)
+            return 2
+        rec = records[args.mast_select]
+        try:
+            query_args = {"target_name": args.mast_target or None, "proposal_id": args.mast_proposal or None, "observation_id": args.mast_observation or None, "radius_arcsec": args.radius_arcsec, "limit": args.mast_limit}
+            if args.ra and args.dec:
+                query_args["ra_deg"], query_args["dec_deg"] = parse_coordinates(args.ra, args.dec)
+            query = MastQuery(**query_args)
+            local_path = download_mast_product(rec, args.mast_cache, query=query)
+        except (MastDownloadError, ProductSelectionError, ValueError) as exc:
+            print(f"MAST download error: {exc}", file=sys.stderr)
+            return 1
+        print(f"Downloaded verified FITS: {local_path}")
+        print(f"Provenance: {local_path.name}.provenance.json")
+        try:
+            from src.core.loader import CubeLoadError, load_fits_cube
+            validated_cube = load_fits_cube(local_path)
+            report = validated_cube.validation_report
+            print(f"Validation: {report.wcs_status}; shape={report.shape}; "
+                  f"wavelength={report.wavelength_range_um[0]:.5g}-{report.wavelength_range_um[1]:.5g} um; "
+                  f"invalid={report.invalid_pixel_count}; DQ-flagged={report.dq_flagged_pixel_count}")
+            for warning in report.warnings:
+                print(f"Validation warning: {warning}")
+        except CubeLoadError as exc:
+            print(f"FITS validation error: {exc}", file=sys.stderr)
+            return 1
+        return 0
     elif args.fits_file:
         filepath = Path(args.fits_file)
         if not filepath.exists():

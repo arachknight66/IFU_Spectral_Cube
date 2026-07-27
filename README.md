@@ -4,6 +4,9 @@ Phase 1 adds traceable, validated JSON specifications for MIRI MRS false-colour
 images. See [the image-recipe guide](docs/image_recipes.md) for the scientific
 and presentation mapping conventions.
 
+Phase 2 adds real MAST-only discovery and verified public `s3d` FITS caching;
+see [the MAST ingestion guide](docs/mast_ingestion.md).
+
 A modern, production-grade Python pipeline designed specifically to process and analyze **JWST MIRI Medium Resolution Spectroscopy (MRS)** Integral Field Unit (IFU) data cubes. It conducts fully automated spectral alignment, denoising, peak detection, emission line identification, and complex spatial mapping through either a CLI or an interactive **Streamlit frontend dashboard**.
 
 ---

@@ -4,6 +4,10 @@ Unit tests for MAST celestial coordinate (RA/Dec) parsing and cone search.
 
 from __future__ import annotations
 
+import os
+
+import pytest
+
 from src.core.mast import parse_coordinates, search_mast_jwst
 
 
@@ -21,8 +25,9 @@ def test_parse_coordinates_sexagesimal():
     assert 33.5 < dec_deg < 34.5
 
 
+@pytest.mark.skipif(os.getenv("RUN_MAST_INTEGRATION") != "1", reason="set RUN_MAST_INTEGRATION=1 for live MAST")
 def test_search_mast_jwst_coords():
-    """Verify searching MAST using RA/Dec coordinates."""
+    """Optional live verification of the MAST coordinate search."""
     results = search_mast_jwst(ra=339.967, dec=33.963, radius_arcsec=15.0, limit=2)
     assert isinstance(results, list)
     assert len(results) > 0
