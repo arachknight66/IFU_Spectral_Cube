@@ -1,0 +1,80 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "jwst-ifu-spectral-cube"
+version = "1.0.0"
+description = "Uncertainty-aware JWST MIRI IFU spectral cube alignment, continuum-subtracted component mapping, and reproducible NASA-style false-colour rendering."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [
+    { name = "JWST MIRI IFU Pipeline Team" }
+]
+keywords = [
+    "astronomy", "jwst", "miri", "ifu", "fits", "wcs",
+    "spectral-cube", "continuum-subtraction", "false-colour", "reproducibility"
+]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Astronomy",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.14",
+]
+dependencies = [
+    "astropy>=5.0",
+    "numpy>=1.22.0",
+    "scipy>=1.8.0",
+    "matplotlib>=3.5.0",
+    "pillow>=9.0.0",
+    "reproject>=0.10.0",
+    "streamlit>=1.25.0",
+    "requests>=2.28.0",
+    "pydantic>=2.0.0",
+    "tifffile>=2022.5.4",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-cov>=4.0.0",
+    "pytest-asyncio>=0.20.0",
+    "ruff>=0.1.0",
+    "mypy>=1.0.0",
+]
+
+[project.scripts]
+jwst-ifu-pipeline = "main:main"
+
+[tool.pytest.ini_options]
+minversion = "7.0"
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-ra -q --import-mode=importlib -m 'not integration'"
+markers = [
+    "integration: tests requiring live external MAST network access",
+    "network: tests making network HTTP queries",
+]
+filterwarnings = [
+    "ignore::DeprecationWarning",
+    "ignore::astropy.io.fits.card.VerifyWarning",
+]
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP"]
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.10"
+warn_return_any = false
+warn_unused_configs = true
+ignore_missing_imports = true

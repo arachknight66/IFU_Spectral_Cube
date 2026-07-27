@@ -25,6 +25,7 @@ def test_parse_coordinates_sexagesimal():
     assert 33.5 < dec_deg < 34.5
 
 
+@pytest.mark.integration
 @pytest.mark.skipif(os.getenv("RUN_MAST_INTEGRATION") != "1", reason="set RUN_MAST_INTEGRATION=1 for live MAST")
 def test_search_mast_jwst_coords():
     """Optional live verification of the MAST coordinate search."""

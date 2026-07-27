@@ -1,0 +1,43 @@
+# Python & Bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Environments
+.venv/
+env/
+venv/
+ENV/
+
+# Pytest / Coverage / Tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Raw FITS Data & Large Datasets (Never commit raw FITS products)
+data/raw/*.fits
+data/raw/*.fits.gz
+data/*.fits
+data/*.fits.gz
+
+# Pipeline Output Directory & Generated Images
+output/
+output_demo/
+output_final/
+output_mast/
+output_radec/
+output_res/
+output_test/
+
+# OS / IDE Files
+.DS_Store
+.vscode/
+.idea/
+*.swp
+*.tmp
+
+# Local logs & sidecars
+*.log

@@ -212,6 +212,14 @@ def main(argv: list[str] | None = None) -> int:
 
     pipeline = SpectralPipeline(config)
 
+    # Phase 8 Provenance Manifest Validation Command
+    if args.command_or_fits == "validate-manifest":
+        from src.utils.provenance_validator import main_cli
+        manifest_arg = args.recipe or (args.fits_file if hasattr(args, 'fits_file') else "")
+        if not manifest_arg and len(sys.argv) > 2:
+            manifest_arg = sys.argv[2]
+        return main_cli([manifest_arg] if manifest_arg else [])
+
     # Phase 6 Render Subcommand / Command Mode
     if args.command_or_fits == "render" or (args.recipe and args.red and args.green and args.blue):
         print("=" * 60)
